@@ -151,8 +151,18 @@
     const frontImgs = sc.image_uris || (faces && faces[0] && faces[0].image_uris);
     const backImgs = !sc.image_uris && faces && faces[1] && faces[1].image_uris ? faces[1].image_uris : null;
     const front = faces ? faces[0] : sc;
-    const pt = front.power != null ? `${front.power}/${front.toughness}` : front.loyalty != null ? `[${front.loyalty}]` : null;
+    const back = backImgs && faces ? faces[1] : null;
+    const ptOf = (f) => (f && f.power != null ? `${f.power}/${f.toughness}` : null);
+    const pt = ptOf(front) || ptOf(sc);
+    // split / adventure cards: one image, several faces of text
+    const oracle = faces && !back ? faces.map((f) => f.oracle_text || '').join('\n') : front.oracle_text || sc.oracle_text || '';
     return {
+      manaCost: front.mana_cost || sc.mana_cost || '',
+      oracle,
+      backOracle: back ? back.oracle_text || '' : '',
+      backPt: back ? ptOf(back) : null,
+      backTypeLine: back ? back.type_line || '' : '',
+      loyalty: front.loyalty || null,
       qty: entry.qty,
       isCommander: !!entry.isCommander,
       name: backImgs && faces ? faces[0].name : sc.name,
@@ -162,7 +172,7 @@
       cn: sc.collector_number,
       img: (frontImgs && frontImgs.normal) || imageFromId(sc.id),
       backImg: backImgs ? backImgs.normal : null,
-      typeLine: front.type_line || sc.type_line || '',
+      typeLine: (faces && !back ? sc.type_line : front.type_line) || sc.type_line || '',
       pt,
       scryfallUri: sc.scryfall_uri ? sc.scryfall_uri.split('?')[0] : null,
       tokens: (sc.all_parts || [])
@@ -278,7 +288,131 @@
     return templateFromScryfall(await getJSON(`https://api.scryfall.com/cards/${id}`), { qty: 1 });
   }
 
-  const api = { importDeck, searchTokens, getCard, parseText, archidektId, imageFromId };
+  /* ------------------------------------------------- effect suggestions */
+
+  const NUMWORDS = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  const KEYWORDS = [
+    'flying', 'first strike', 'double strike', 'deathtouch', 'haste', 'hexproof', 'indestructible', 'lifelink', 'menace', 'reach',
+    'trample', 'vigilance', 'shroud', 'defender', 'prowess', 'flash', 'infect', 'wither', 'fear', 'intimidate', 'skulk', 'horsemanship',
+  ];
+  const IRREGULAR = { elves: 'Elf', dwarves: 'Dwarf', wolves: 'Wolf', werewolves: 'Werewolf', men: 'Man', mice: 'Mouse', zombies: 'Zombie', faeries: 'Faerie', pixies: 'Pixie', zombie: 'Zombie', fungi: 'Fungus', octopi: 'Octopus', sphinxes: 'Sphinx', foxes: 'Fox' };
+  const singular = (w) => {
+    const l = w.toLowerCase();
+    if (IRREGULAR[l]) return IRREGULAR[l];
+    if (l.endsWith('ies')) return w.slice(0, -3) + 'y';
+    if (l.endsWith('s') && !l.endsWith('ss')) return w.slice(0, -1);
+    return w;
+  };
+  const num = (w) => (/^\d+$/.test(w) ? Number(w) : NUMWORDS[String(w).toLowerCase()]);
+  const pm = (v) => Number(v);
+  const escRe = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  function parseKeywords(list) {
+    if (!list) return [];
+    const out = [];
+    for (let k of list.split(/,\s*and\s+|,\s*|\s+and\s+/)) {
+      k = k.trim().replace(/\.$/, '');
+      const l = k.toLowerCase();
+      if (KEYWORDS.includes(l) || l.startsWith('protection from') || l.startsWith('ward')) out.push(k[0].toUpperCase() + k.slice(1));
+    }
+    return out;
+  }
+
+  /**
+   * Read a card's rules text and suggest effects for the effect builder.
+   * Only common, fixed wordings are recognised; anything else is left to the player.
+   * Returns { suggestions: [{effect, conditional}], unhandled: bool }.
+   */
+  function suggestEffects(tpl) {
+    const suggestions = [];
+    let unhandled = false;
+    const names = [...new Set([tpl.name, (tpl.name || '').split(' // ')[0], (tpl.name || '').split(',')[0]].filter((n) => n && n.length > 2))].sort(
+      (a, b) => b.length - a.length,
+    );
+    for (const raw of [tpl.oracle, tpl.backOracle]) {
+      if (!raw) continue;
+      let text = raw;
+      for (const n of names) text = text.replace(new RegExp(escRe(n), 'g'), '~');
+      text = text.replace(/\b[Tt]his (creature|artifact|enchantment|Equipment|Vehicle|permanent)\b/g, '~');
+      for (const line of text.split('\n')) {
+        if (/^\([^)]*\)$/.test(line.trim())) continue; // reminder text only
+        const clean = line.replace(/\([^)]*\)/g, '').trim();
+        const colon = clean.indexOf(':');
+        const quote = clean.indexOf('"');
+        for (let sentence of clean.split(/(?<=\.)\s+/)) {
+          sentence = sentence.trim();
+          if (!sentence) continue;
+          const at = clean.indexOf(sentence);
+          if (colon >= 0 && colon < at + 1) continue; // part of an activated ability ("{2}: …")
+          if (quote >= 0 && quote < at + 1) continue; // granted ability text
+          if (/until end of turn|until your next turn|this turn|\bwhenever\b|^when\b|^at the beginning/i.test(sentence)) continue;
+          let conditional = /^(as long as|during your turn|during each of your turns|if )/i.test(sentence);
+          let s2 = sentence.replace(/^(As long as [^,]+|During your turn|During each of your turns), /i, '').replace(/\.$/, '');
+          const tail = /^(.*?),? as long as .+$/i.exec(s2);
+          if (tail) {
+            s2 = tail[1];
+            conditional = true;
+          }
+          const before = suggestions.length;
+          const add = (effect) => suggestions.push({ effect, conditional, source: sentence });
+          let m;
+          if ((m = /^(Equipped|Enchanted) creature gets ([+-]\d+)\/([+-]\d+)(?:,? and (?:has|gains) (.+))?$/i.exec(s2))) {
+            add({ kind: 'pt', who: 'attached', p: pm(m[2]), t: pm(m[3]) });
+            for (const k of parseKeywords(m[4])) add({ kind: 'keyword', who: 'attached', keyword: k });
+          } else if ((m = /^(Equipped|Enchanted) creature (?:has|gains) (.+)$/i.exec(s2))) {
+            for (const k of parseKeywords(m[2])) add({ kind: 'keyword', who: 'attached', keyword: k });
+          } else if ((m = /^(Other )?(?:([A-Za-z][\w'-]*(?: [A-Z][\w'-]*)?) )?[Cc]reatures you control get ([+-]\d+)\/([+-]\d+)(?: and have (.+))?$/.exec(s2))) {
+            const who = m[1] ? 'yoursOther' : 'yours';
+            const filter = m[2] && m[2] !== 'Other' ? m[2] : '';
+            if (/^(attacking|blocking|tapped|untapped|token|nontoken|white|blue|black|red|green|colorless|multicolored|non)/i.test(filter)) unhandled = true;
+            else {
+              add({ kind: 'pt', who, filter: filter ? filter[0].toUpperCase() + filter.slice(1) : '', p: pm(m[3]), t: pm(m[4]) });
+              for (const k of parseKeywords(m[5])) add({ kind: 'keyword', who, filter, keyword: k });
+            }
+          } else if ((m = /^(Other )?([A-Z][a-z'-]+) you control get ([+-]\d+)\/([+-]\d+)(?: and have (.+))?$/.exec(s2)) && !/^(Creatures|Permanents|Artifacts|Lands)$/.test(m[2])) {
+            const who = m[1] ? 'yoursOther' : 'yours';
+            const filter = singular(m[2]);
+            add({ kind: 'pt', who, filter, p: pm(m[3]), t: pm(m[4]) });
+            for (const k of parseKeywords(m[5])) add({ kind: 'keyword', who, filter, keyword: k });
+          } else if ((m = /^Creatures your opponents control get ([+-]\d+)\/([+-]\d+)$/.exec(s2))) {
+            add({ kind: 'pt', who: 'opponents', p: pm(m[1]), t: pm(m[2]) });
+          } else if ((m = /^All (?:([A-Z][\w'-]*) )?creatures get ([+-]\d+)\/([+-]\d+)$/.exec(s2))) {
+            add({ kind: 'pt', who: 'all', filter: m[1] || '', p: pm(m[2]), t: pm(m[3]) });
+          } else if ((m = /^~ gets ([+-]\d+)\/([+-]\d+) for each (other )?(.+?) (you control|your opponents control|an opponent controls|on the battlefield|in your graveyard)$/.exec(s2))) {
+            let thing = m[4].replace(/\s+card$/, '').replace(/^card$/, 'card');
+            if (/\b(and|or)\b|[,/]/.test(thing) || /\b(tapped|untapped|attacking|with)\b/.test(thing)) {
+              unhandled = true;
+            } else {
+              const where = { 'you control': 'you', 'your opponents control': 'opp', 'an opponent controls': 'opp', 'on the battlefield': 'all', 'in your graveyard': 'yourGraveyard' }[m[5]];
+              thing = thing.replace(/ cards?$/, '');
+              add({ kind: 'forEach', p: pm(m[1]), t: pm(m[2]), count: thing, where, other: !!m[3] });
+            }
+          } else if ((m = /^~ gets ([+-]\d+)\/([+-]\d+)(?: and has (.+))?$/.exec(s2))) {
+            add({ kind: 'pt', who: 'self', p: pm(m[1]), t: pm(m[2]) });
+            for (const k of parseKeywords(m[3])) add({ kind: 'keyword', who: 'self', keyword: k });
+          } else if ((m = /^Each (other )?(.+?) you control enters(?: the battlefield)? with (an?|one|two|three|four|five|\d+) additional ([+-]1\/[+-]1|\w+) counters? on it$/i.exec(s2))) {
+            const subj = m[2].replace(/ creature$/, '');
+            if (/\bnon|\bor\b|\band\b|,/.test(subj)) unhandled = true;
+            else add({ kind: 'etb', who: m[1] ? 'yoursOther' : 'yours', filter: /^creature$/i.test(subj) ? '' : singular(subj), n: num(m[3]) || 1, counter: m[4] });
+          } else if ((m = /^~ enters(?: the battlefield)? with (an?|one|two|three|four|five|six|\d+) ([+-]1\/[+-]1|\w+) counters? on it$/i.exec(s2))) {
+            add({ kind: 'etb', who: 'self', n: num(m[1]) || 1, counter: m[2] });
+          } else if ((m = /^(Other )?(?:([A-Z][\w'-]*) )?[Cc]reatures you control have (.+)$/.exec(s2))) {
+            for (const k of parseKeywords(m[3])) add({ kind: 'keyword', who: m[1] ? 'yoursOther' : 'yours', filter: m[2] || '', keyword: k });
+          }
+          if (suggestions.length === before && /[+-]\d+\/[+-]\d+/.test(sentence) && !/counter/i.test(sentence)) unhandled = true;
+        }
+      }
+    }
+    const E = root.MTGEngine || (typeof require !== 'undefined' ? require('./engine.js') : null);
+    for (const sug of suggestions) {
+      sug.effect.on = true;
+      if (sug.conditional) sug.effect.note = 'Conditional: switch on/off as needed';
+      sug.text = E ? E.describeEffect(sug.effect) : sug.effect.kind;
+    }
+    return { suggestions, unhandled };
+  }
+
+  const api = { importDeck, searchTokens, getCard, parseText, archidektId, imageFromId, suggestEffects };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MTGImporter = api;
 })(typeof window !== 'undefined' ? window : globalThis);

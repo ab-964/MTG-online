@@ -23,20 +23,22 @@ Your friend doesn't need to do any of this. They just open your site's address.
 ## Part 2: Each time you play
 
 **Host (you):**
-1. Open your site.
+1. Open your site (on a computer if possible).
 2. First time: under **Host a new game**, type your name, choose Commander or 60-card, click **Create & host**.
    Next time: under **Games you host**, click **Open & host** on your saved game.
-3. Click the yellow **game code** at the top. That copies an invite link. Send it to your friend.
+3. Click the yellow **game code** at the top (on a phone: ☰ → Copy invite link). That copies an invite link. Send it to your friends (up to 3).
 4. **Keep this tab open** while you play. If you close it, the game is saved. Reopen it from the lobby and your friend reconnects automatically.
 
-**Friend:**
-1. Open the invite link (or open the site, choose **Join a friend's game** and type the code).
+**Friends:**
+1. Open the invite link (or open the site, choose **Join a friend's game** and type the code). On a phone, turn it sideways.
 2. If they get disconnected, they just reload the page. They keep their seat and nothing is lost.
 
-**Both of you:**
-1. Click **Load deck** and paste your decklist (see below).
-2. When everyone has a deck, click **Start / restart game**. Decks are shuffled, everyone draws 7 and a random player goes first.
-3. Click **Help** in the game for controls.
+**Everyone:**
+1. Click **Load deck** (phone: ☰ → Load deck) and paste your decklist, or pick a deck you imported before (see below).
+2. When everyone has a deck, someone clicks **Start game**. Decks are shuffled and everyone draws 7.
+3. Each player chooses **Mulligan** (shuffle and draw a fresh 7, as often as you like) or **Keep**.
+4. Once everyone has kept, a d20 pops up for each player. **Flick it** (a quick swipe) to roll. Highest goes first and turn order follows the rolls. Ties roll again.
+5. Click **Help** in the game for controls.
 
 ## Getting your deck from Archidekt
 
@@ -47,7 +49,14 @@ Your friend doesn't need to do any of this. They just open your site's address.
 
 The set code + collector number means each card shows the exact art you chose. Cards in **Maybeboard** / **Sideboard**
 categories are skipped, and cards in the **Commander** category start in the command zone.
-Decks you import are remembered in your browser, so next time you can pick them from the list.
+
+After importing you'll see an **automation report**. It lists the cards whose text the helper recognised
+(like *"Mirari's Wake: creatures you control get +1/+1"*) with a tick box each. Untick anything that's wrong, or press
+**Edit** to fix it. Cards it couldn't work out are marked ⚠. You can set those up yourself in game
+(right-click / tap the card → **Effects…**).
+
+Decks you import are remembered in your browser, with their effects. Next time pick them from
+**Decks you imported before**, where you can also **Rename** or **Remove** them.
 
 Other formats work too: Moxfield, MTG Arena exports, or plain `1 Lightning Bolt` lines (those get Scryfall's default art).
 
@@ -68,4 +77,7 @@ If you know git: `git clone`, edit, `git push`. That's all there is to it. There
 | Can't connect at all | Some networks block direct browser connections. Try another network (e.g. home Wi-Fi instead of work/school). |
 | My saved game is gone | Saved games belong to one browser + one site address. Clearing browsing data deletes them, so use **Backup** now and then. |
 | Card shows as text instead of art | Scryfall didn't recognise that line. Check the spelling or set code. |
+| A card's power/toughness total is wrong | Hover it (phone: tap it) to see where each bonus comes from, then fix its **Effects…** or the **Power/toughness bonus…** |
+| The phone shows "Turn your phone sideways" | The phone layout is landscape-only. Turn off rotation lock. |
+| I want the computer layout on a tablet (or vice versa) | Settings → Layout. |
 | The page looks old after an update | Hard-refresh: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> (Mac: <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>). |

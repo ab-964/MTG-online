@@ -1,5 +1,7 @@
 /**
- * Everything you see and click: lobby, battlefield, hand, menus, dialogs.
+ * Shared interface + the computer (mouse) layout: lobby, battlefields, hand,
+ * menus, dialogs, dice, permission prompts. The phone layout lives in phone.js
+ * and reuses the helpers exported at the bottom as window.MTGUI.
  */
 (function () {
   'use strict';
@@ -14,16 +16,25 @@
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const sign = (n) => (n >= 0 ? `+${n}` : `${n}`);
   const large = (url) => (url ? url.replace('/normal/', '/large/') : url);
   const NAME_KEY = 'mtgtt.name';
   const DECKS_KEY = 'mtgtt.decks';
+  const LAYOUT_KEY = 'mtgtt.layout';
+  const VIEW_KEY = 'mtgtt.boardView';
+  const BOLT = '<svg viewBox="0 0 16 16" class="ic"><path d="M9.5 1 3 9h4l-1 6 6.5-8h-4z" fill="currentColor"/></svg>';
+  const SPARK = '<svg viewBox="0 0 16 16" class="ic"><path d="M8 1l1.6 5.4L15 8l-5.4 1.6L8 15l-1.6-5.4L1 8l5.4-1.6z" fill="currentColor"/></svg>';
+  const D20_SVG =
+    '<svg viewBox="0 0 100 100" class="d20svg"><polygon points="50,3 93,27 93,73 50,97 7,73 7,27" class="d-out"/>' +
+    '<polygon points="50,24 79,71 21,71" class="d-in"/>' +
+    '<path d="M50,3L50,24M93,27L50,24M7,27L50,24M93,27L79,71M7,27L21,71M93,73L79,71M7,73L21,71M50,97L79,71M50,97L21,71" class="d-lines"/></svg>';
 
   function toast(msg, kind = '') {
     const t = document.createElement('div');
     t.className = `toast ${kind}`;
     t.textContent = msg;
     $('#toasts').appendChild(t);
-    setTimeout(() => t.remove(), kind === 'error' ? 5000 : 3000);
+    setTimeout(() => t.remove(), kind === 'error' ? 5000 : 3200);
   }
 
   function relTime(ts) {
@@ -54,20 +65,24 @@
     return `https://scryfall.com/search?q=${encodeURIComponent(`!"${c.name}"`)}`;
   }
 
+  const isEquipLike = (c) => /\b(Equipment|Aura)\b/.test((c && c.typeLine) || '');
+  const isLandCard = (c) => /\bLand\b/.test((c && (c.flipped && c.backTypeLine ? c.backTypeLine : c.typeLine)) || '') && !/\bCreature\b/.test((c && c.typeLine) || '');
+  const isPermanentCard = (c) => /\b(Creature|Artifact|Enchantment|Planeswalker|Land|Battle)\b/.test((c && c.typeLine) || '');
+
   /* ============================================================= dialogs */
 
   /**
-   * dialog({ title, body (html string), buttons: [{label, value, primary, danger}], wide, onMount(root, close) })
+   * dialog({ title, body, buttons: [{label, value, primary, danger, cls}], wide, onMount(root, close) })
    * Resolves with { value, root } (value null if dismissed).
    */
-  function dialog({ title, body = '', buttons = [{ label: 'Close', value: null }], wide = false, onMount }) {
+  function dialog({ title, body = '', buttons = [{ label: 'Close', value: null }], wide = false, onMount, noDismiss = false }) {
     return new Promise((resolve) => {
       const bg = document.createElement('div');
       bg.className = 'modal-bg';
       bg.innerHTML = `<div class="modal ${wide ? 'wide' : ''}" role="dialog">
         <h3>${esc(title)}</h3><div class="mb">${body}</div>
         <div class="mf">${buttons
-          .map((b, i) => `<button class="btn ${b.primary ? 'primary' : ''} ${b.danger ? 'danger' : ''}" data-i="${i}">${esc(b.label)}</button>`)
+          .map((b, i) => `<button class="btn ${b.primary ? 'primary' : ''} ${b.danger ? 'danger' : ''} ${b.cls || ''}" data-i="${i}">${esc(b.label)}</button>`)
           .join('')}</div></div>`;
       const root = bg.querySelector('.modal');
       let done = false;
@@ -79,10 +94,11 @@
         resolve({ value, root });
       };
       const onKey = (e) => {
-        if (e.key === 'Escape') {
+        if (!document.body.contains(bg) || bg !== $('#modal-root').lastElementChild) return;
+        if (e.key === 'Escape' && !noDismiss) {
           e.stopPropagation();
           close(null);
-        } else if (e.key === 'Enter' && e.target.tagName === 'INPUT') {
+        } else if (e.key === 'Enter' && e.target.tagName === 'INPUT' && !e.target.dataset.noenter) {
           const p = buttons.findIndex((b) => b.primary);
           if (p >= 0) {
             e.preventDefault();
@@ -90,9 +106,10 @@
           }
         }
       };
-      bg.addEventListener('pointerdown', (e) => {
-        if (e.target === bg) close(null);
-      });
+      if (!noDismiss)
+        bg.addEventListener('pointerdown', (e) => {
+          if (e.target === bg) close(null);
+        });
       root.querySelector('.mf').addEventListener('click', (e) => {
         const b = e.target.closest('button[data-i]');
         if (b) close(buttons[Number(b.dataset.i)].value);
@@ -100,15 +117,15 @@
       document.addEventListener('keydown', onKey, true);
       $('#modal-root').appendChild(bg);
       if (onMount) onMount(root, close);
-      const first = root.querySelector('input, textarea, select');
-      if (first) setTimeout(() => first.focus(), 30);
+      const first = root.querySelector('input:not([type=checkbox]):not([type=color]), textarea, select');
+      if (first && !U.phone) setTimeout(() => first.focus(), 30);
     });
   }
 
   async function askNumber(title, def = 1, label = '') {
     const { value, root } = await dialog({
       title,
-      body: `<label class="form">${esc(label)}<input type="number" value="${def}" id="dlg-num" /></label>`,
+      body: `<label class="form">${esc(label)}<input type="number" inputmode="numeric" value="${def}" id="dlg-num" /></label>`,
       buttons: [{ label: 'Cancel', value: null }, { label: 'OK', value: 'ok', primary: true }],
     });
     if (value !== 'ok') return null;
@@ -140,6 +157,8 @@
   function showLobby() {
     $('#lobby').hidden = false;
     $('#game').hidden = true;
+    $('#phone').hidden = true;
+    document.body.classList.remove('in-game');
     const name = Store.get(NAME_KEY) || '';
     for (const f of ['#host-form', '#join-form']) $(f).elements.name.value = name;
 
@@ -154,20 +173,20 @@
                 ${g.format === 'commander' ? 'Commander' : '60-card'} · ${g.players.map((p) => esc(p.name)).join(', ')} · ${relTime(g.updatedAt)}</span></div>
               <button class="btn primary" data-host="${esc(g.id)}">Open &amp; host</button>
               <button class="btn ghost" data-backup="${esc(g.id)}" title="Download a backup file">Backup</button>
-              <button class="btn ghost" data-del="${esc(g.id)}" title="Delete">🗑</button>
+              <button class="btn ghost" data-del="${esc(g.id)}" title="Delete">Delete</button>
             </div>`,
           )
           .join('')
       : '<p class="muted">No hosted games yet.</p>';
 
     const seats = Store.keys('mtgtt.seat.')
-      .map((k) => ({ code: k.slice('mtgtt.seat.'.length), ...(Store.get(k) || {}) }))
+      .map((k) => ({ code: k.slice('mtgtt.seat.'.length).split('.')[0], ...(Store.get(k) || {}) }))
       .filter((s) => !Store.loadGame(s.code))
       .sort((a, b) => (b.joinedAt || 0) - (a.joinedAt || 0))
       .slice(0, 6);
     $('#recent-joins').innerHTML = seats.length
       ? `<div class="recent muted">Rejoin: ${seats
-          .map((s) => `<button class="btn small" data-rejoin="${esc(s.code)}">${esc(s.gameName || s.code)} (${esc(s.name || '')})</button>`)
+          .map((s) => `<button class="btn small" data-rejoin="${esc(s.code)}" data-name="${esc(s.name || '')}">${esc(s.gameName || s.code)} (${esc(s.name || '')})</button>`)
           .join('')}</div>`
       : '';
   }
@@ -199,7 +218,10 @@
       const b = e.target.closest('button');
       if (!b) return;
       if (b.dataset.host) location.href = `?host=${b.dataset.host}`;
-      if (b.dataset.rejoin) location.href = `?join=${b.dataset.rejoin}`;
+      if (b.dataset.rejoin) {
+        if (b.dataset.name) Store.set(NAME_KEY, b.dataset.name);
+        location.href = `?join=${b.dataset.rejoin}`;
+      }
       if (b.dataset.backup) {
         const g = Store.loadGame(b.dataset.backup);
         if (g) downloadJSON(g, `mtg-game-${g.id}-${new Date().toISOString().slice(0, 10)}.json`);
@@ -233,28 +255,44 @@
 
   let session = null;
   let S = null; // latest view from the host
+  let firstState = true;
   const views = {}; // battlefield camera per player id: {x, y, z, auto}
   let viewer = null; // open zone viewer state
   let hoveredId = null;
   let lastLogId = 0;
+  let selectedOpp = null; // focus layout: which opponent is shown
+  let boardView = Store.get(VIEW_KEY) || 'focus'; // 'focus' | 'grid'
+  let mode = null; // { kind: 'proliferate'|'attach', ... }
+  const renderHooks = [];
 
   function onStatus({ level, text }) {
-    const el = $('#status');
-    el.className = `status ${level}`;
-    el.textContent = text;
-    el.title = text;
+    for (const el of $$('.status-pill')) {
+      el.classList.remove('good', 'warn', 'bad');
+      el.classList.add(level);
+      el.textContent = text;
+      el.title = text;
+    }
+    U.status = { level, text };
   }
 
   function onState(view) {
     S = view;
     render();
+    firstState = false;
+  }
+
+  function onMessage(msg) {
+    if (msg.type === 'notify') toast(msg.text, 'error');
+    if (msg.type === 'private' && msg.private) openViewerPrivate(msg.private);
+    if (msg.type === 'effects') updateSavedDeckEffects(msg.name, msg.effects);
   }
 
   async function act(action) {
     if (!session) return { error: 'Not connected.' };
-    const r = await session.act(action);
-    if (r && r.error) toast(r.error, 'error');
-    return r || {};
+    const r = (await session.act(action)) || {};
+    if (r.error) toast(r.error, 'error');
+    if (r.pending) toast(`Asked ${r.pending.waitingFor} for permission…`);
+    return r;
   }
 
   function startHost(code) {
@@ -263,13 +301,15 @@
       showLobby();
       return toast(`No saved game with code ${code} in this browser. To join a friend's game, use "Join a friend's game".`, 'error');
     }
-    session = new HostSession(g, { onState, onStatus });
+    session = new HostSession(g, { onState, onStatus, onMessage });
+    U.session = session;
     showGame();
     session.start();
   }
 
   async function startJoin(code) {
     let name = Store.get(NAME_KEY) || (Store.getSeat(code) || {}).name;
+    U.myName = name;
     if (!name) {
       name = await askText('Your name', '', 'e.g. Sam', 'Pick a name for this game');
       if (!name) return showLobby();
@@ -279,6 +319,7 @@
     session = new GuestSession(code, name, {
       onState,
       onStatus,
+      onMessage,
       onNeedName: async () => {
         const n = await askText('Your name', '', '', 'Pick a name for this game');
         if (n) session.setName(n);
@@ -289,12 +330,25 @@
         if (n) session.setName(n);
       },
     });
+    U.session = session;
     session.start();
+  }
+
+  function wantPhone() {
+    const pref = Store.get(LAYOUT_KEY);
+    if (pref === 'phone') return true;
+    if (pref === 'desktop') return false;
+    return window.matchMedia('(pointer: coarse)').matches;
   }
 
   function showGame() {
     $('#lobby').hidden = true;
-    $('#game').hidden = false;
+    document.body.classList.add('in-game');
+    U.phone = wantPhone();
+    document.body.classList.toggle('phone-mode', U.phone);
+    $('#game').hidden = U.phone;
+    $('#phone').hidden = !U.phone;
+    if (U.phone && window.MTGPhone) window.MTGPhone.init();
     try {
       if (localStorage.getItem('mtgtt.hideLog') === '1') $('#game').classList.add('no-log');
     } catch {
@@ -308,86 +362,193 @@
   const playerById = (id) => S && S.players.find((p) => p.id === id);
   const getCard = (id) => (S && S.cards[id]) || (viewer && viewer.map && viewer.map[id]) || null;
 
+  /** Players in turn order starting with you. */
+  function seatOrder() {
+    const order = (S.order || S.players.map((p) => p.id)).filter((id) => playerById(id));
+    const i = order.indexOf(S.you);
+    return i < 0 ? order : order.slice(i).concat(order.slice(0, i));
+  }
+
   function render() {
     if (!S) return;
     document.title = `${S.name} · MTG Tabletop`;
-    $('#game-name').textContent = S.name;
-    $('#btn-code').textContent = S.id;
-
-    const mine = me();
-    const opps = S.players.filter((p) => p.id !== S.you);
-
-    // opponents' areas
-    const oppBox = $('#opponents');
-    for (const el of $$('.player-area', oppBox)) if (!opps.some((p) => p.id === el.dataset.pid)) el.remove();
-    for (const p of opps) renderArea(oppBox, p, false);
-    // my area
-    const meBox = $('#me-area');
-    if (mine) renderArea(meBox, mine, true);
-    else meBox.innerHTML = '<p class="muted" style="margin:auto">You are not seated in this game.</p>';
-
-    renderCenter();
-    renderHandAndPiles(mine);
-    renderLog();
+    if (!U.phone) renderDesktop();
+    renderSetup();
+    renderRequests();
+    renderModeBanner();
     if (viewer) renderViewer();
+    for (const fn of renderHooks) fn(S);
   }
 
-  function renderArea(parent, p, isMe) {
-    let area = $(`.player-area[data-pid="${p.id}"]`, parent);
-    if (!area) {
-      area = document.createElement('div');
-      area.className = 'player-area';
-      area.dataset.pid = p.id;
-      area.innerHTML = `<div class="ppanel"></div>
-        <div class="bf" data-pid="${p.id}">
-          <div class="bf-table" data-drop="bf" data-player="${p.id}">
-            <div class="zone-hint" style="top:82px">CREATURES</div>
-            <div class="zone-hint" style="top:332px">OTHER PERMANENTS</div>
-            <div class="zone-hint" style="top:582px">LANDS</div>
-            <div class="layer" style="position:absolute;inset:0"></div>
-          </div>
-          <div class="bf-owner"></div>
-          <div class="bf-controls">
-            <button class="btn tiny" data-zoom="out" title="Zoom out">−</button>
-            <button class="btn tiny" data-zoom="fit" title="Fit whole battlefield">fit</button>
-            <button class="btn tiny" data-zoom="in" title="Zoom in">+</button>
-          </div>
-        </div>`;
-      parent.appendChild(area);
-      const table = $('.bf-table', area);
-      table.style.width = `${S.table.w}px`;
-      table.style.height = `${S.table.h}px`;
-      setupBattlefield($('.bf', area), p.id);
+  function renderDesktop() {
+    $('#game-name').textContent = S.name;
+    $('#btn-code').textContent = S.id;
+    $('#btn-start').textContent = S.setup && S.setup.stage !== 'done' ? 'Restart game' : 'Start game';
+    const mine = me();
+    const seats = seatOrder();
+    const opps = seats.filter((id) => id !== S.you).map(playerById);
+    if (!opps.some((p) => p.id === selectedOpp)) selectedOpp = opps[0] ? opps[0].id : null;
+
+    const grid = boardView === 'grid';
+    $('#btn-grid').textContent = grid ? 'One opponent' : 'All battlefields';
+    $('#grid').hidden = !grid;
+    $('#opponents').hidden = grid;
+    $('#me-area').hidden = grid;
+    $('#table').classList.toggle('grid-mode', grid);
+
+    // build / update every player's area
+    for (const p of S.players) ensureArea(p);
+    for (const el of $$('.player-area')) if (!playerById(el.dataset.pid)) el.remove();
+
+    const park = $('#park');
+    if (grid) {
+      const n = seats.length;
+      $('#grid').dataset.n = String(n);
+      const cells = $$('#grid .cell');
+      for (const c of cells) {
+        c.classList.remove('log-cell');
+        c.hidden = false;
+      }
+      seats.forEach((pid, i) => {
+        const cell = $(`#grid .cell[data-slot="${i}"]`);
+        const area = areaEl(pid);
+        area.className = `player-area in-grid slot-${i}`;
+        if (area.parentElement !== cell) cell.appendChild(area);
+      });
+      for (let i = n; i < 4; i++) {
+        const cell = $(`#grid .cell[data-slot="${i}"]`);
+        cell.hidden = !(n === 3 && i === 3);
+      }
+      const logCell = $('#grid .cell[data-slot="3"]');
+      if (n === 3) {
+        logCell.classList.add('log-cell');
+        if ($('#sidebar').parentElement !== logCell) logCell.appendChild($('#sidebar'));
+      } else if ($('#sidebar').parentElement !== $('#game')) $('#game').appendChild($('#sidebar'));
+    } else {
+      if ($('#sidebar').parentElement !== $('#game')) $('#game').appendChild($('#sidebar'));
+      for (const p of S.players) {
+        const area = areaEl(p.id);
+        area.className = 'player-area';
+        let home = park;
+        if (p.id === S.you) home = $('#me-area');
+        else if (p.id === selectedOpp) home = $('#opponents');
+        if (area.parentElement !== home) home.appendChild(area);
+      }
     }
-    area.classList.toggle('active', S.turn.active === p.id);
-    $('.ppanel', area).innerHTML = panelHTML(p, isMe);
+    for (const p of S.players) fillArea(p, opps.length);
+    for (const p of S.players) {
+      const a = areaEl(p.id);
+      a.classList.toggle('active', S.turn.active === p.id);
+    }
+    if (!mine) $('#me-area').innerHTML = '<p class="muted" style="margin:auto">You are not seated in this game.</p>';
+    renderCenter();
+    renderHandAndPiles(mine);
+    renderLog($('#log'));
+  }
+
+  const areaEl = (pid) => $(`.player-area[data-pid="${pid}"]`);
+
+  function ensureArea(p) {
+    if (areaEl(p.id)) return;
+    const area = document.createElement('div');
+    area.className = 'player-area';
+    area.dataset.pid = p.id;
+    area.innerHTML = `<div class="ppanel"></div>
+      <div class="bf" data-pid="${p.id}">
+        <div class="bf-table" data-drop="bf" data-player="${p.id}">
+          <div class="zone-hint" style="top:82px">CREATURES</div>
+          <div class="zone-hint" style="top:332px">OTHER PERMANENTS</div>
+          <div class="zone-hint" style="top:582px">LANDS</div>
+          <div class="layer"></div>
+        </div>
+        <div class="bf-owner"></div>
+        <div class="bf-controls">
+          <button class="btn tiny" data-zoom="out" title="Zoom out">−</button>
+          <button class="btn tiny" data-zoom="fit" title="Fit whole battlefield">fit</button>
+          <button class="btn tiny" data-zoom="in" title="Zoom in">+</button>
+        </div>
+      </div>`;
+    $('#park').appendChild(area);
+    const table = $('.bf-table', area);
+    table.style.width = `${S.table.w}px`;
+    table.style.height = `${S.table.h}px`;
+    setupBattlefield($('.bf', area), p.id);
+  }
+
+  function fillArea(p, oppCount) {
+    const area = areaEl(p.id);
+    const isMe = p.id === S.you;
+    $('.ppanel', area).innerHTML = panelHTML(p, isMe, { compact: area.classList.contains('in-grid'), oppCount });
     $('.bf-owner', area).textContent = isMe ? 'Your battlefield' : `${p.name}'s battlefield`;
-    reconcile($('.layer', area), p.zones.battlefield, (id, el) => cardEl(S.cards[id], el, 'bf'));
+    $('.bf', area).style.setProperty('--felt', p.bfColor || '');
+    $('.bf', area).classList.toggle('custom-felt', !!p.bfColor);
+    renderBattlefieldCards($('.layer', area), p);
+  }
+
+  /** Battlefield cards for one pane, with attachments tucked behind their host. */
+  function paneLayout(p) {
+    const onBf = new Set();
+    for (const pl of S.players) for (const id of pl.zones.battlefield) onBf.add(id);
+    const hostOf = (id) => {
+      const c = S.cards[id];
+      return c && c.attachedTo && onBf.has(c.attachedTo) ? c.attachedTo : null;
+    };
+    const attached = {};
+    for (const pl of S.players)
+      for (const id of pl.zones.battlefield) {
+        const h = hostOf(id);
+        if (h) (attached[h] = attached[h] || []).push(id);
+      }
+    const ids = [];
+    const pos = {};
+    for (const id of p.zones.battlefield) {
+      if (hostOf(id)) continue;
+      const host = S.cards[id];
+      (attached[id] || []).forEach((aid, k) => {
+        ids.push(aid);
+        pos[aid] = { x: clamp(host.x + 18 * (k + 1), 0, S.table.w - 100), y: clamp(host.y - 28 * (k + 1), 0, S.table.h - 140) };
+      });
+      ids.push(id);
+    }
+    return { ids, pos };
+  }
+
+  function renderBattlefieldCards(layer, p) {
+    const { ids, pos } = paneLayout(p);
+    const dice = Object.values(S.dice || {}).filter((d) => d.owner === p.id);
+    reconcile(layer, ids.concat(dice.map((d) => `die:${d.id}`)), (id, el) =>
+      id.startsWith('die:') ? dieEl(S.dice[id.slice(4)], el, p.id) : cardEl(S.cards[id], el, 'bf', pos[id]),
+    );
   }
 
   function counterLabel(name, n) {
-    if (name === '+1/+1') return { text: `+${n}/+${n}`, cls: 'plus' };
-    if (name === '-1/-1') return { text: `-${n}/-${n}`, cls: 'minus' };
-    return { text: `${name} ${n}`, cls: '' };
+    if (name === '+1/+1') return `+${n}/+${n}`;
+    if (name === '-1/-1') return `-${n}/-${n}`;
+    return `${name} ${n}`;
   }
 
-  function panelHTML(p, isMe) {
+  function panelHTML(p, isMe, { compact = false, oppCount = 1 } = {}) {
     const rows = [];
-    rows.push(`<div class="pname"><span class="dot" style="background:${esc(p.color)}"></span>${esc(p.name)}${isMe ? ' (you)' : ''}
-      <span class="online ${p.connected ? 'on' : ''}">${p.connected ? '● online' : '○ offline'}</span></div>`);
-    if (p.deckName) rows.push(`<div class="deckname" title="${esc(p.deckName)}">${esc(p.deckName)}</div>`);
+    const sel = mode && mode.kind === 'proliferate' && mode.players.has(p.id) ? 'selected' : '';
+    rows.push(`<div class="pname ${sel}" data-act="pick-player" data-pid="${p.id}"><span class="dot" style="background:${esc(p.color)}"></span><span class="nm">${esc(p.name)}${isMe ? ' (you)' : ''}</span>
+      <span class="online ${p.connected ? 'on' : ''}" title="${p.connected ? 'online' : 'offline'}">${p.connected ? '●' : '○'}</span></div>`);
+    if (!isMe && oppCount > 1 && !compact) {
+      const seats = seatOrder().filter((id) => id !== S.you);
+      const next = playerById(seats[(seats.indexOf(p.id) + 1) % seats.length]);
+      rows.push(`<button class="btn small switch" data-act="switch-opp">⇄ Switch to ${esc(next ? next.name : '')}</button>`);
+    }
     rows.push(`<div class="life" title="Click ± to change life (Shift = 5). Click the number to set it.">
       <button class="btn" data-act="life" data-pid="${p.id}" data-d="-1">−</button>
       <span class="val" data-act="setlife" data-pid="${p.id}">${p.life}</span>
       <button class="btn" data-act="life" data-pid="${p.id}" data-d="1">+</button></div>`);
-    const counters = Object.entries(p.counters || {});
-    for (const [k, v] of counters)
+    if (!compact && p.deckName) rows.push(`<div class="deckname" title="${esc(p.deckName)}">${esc(p.deckName)}</div>`);
+    for (const [k, v] of Object.entries(p.counters || {}))
       rows.push(`<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span>
         <button class="btn tiny" data-act="pc" data-pid="${p.id}" data-name="${esc(k)}" data-d="-1">−</button>
         <button class="btn tiny" data-act="pc" data-pid="${p.id}" data-name="${esc(k)}" data-d="1">+</button></div>`);
-    rows.push(`<button class="btn small" data-act="pc-add" data-pid="${p.id}">+ player counter</button>`);
+    if (!compact) rows.push(`<button class="btn small" data-act="pc-add" data-pid="${p.id}">+ player counter</button>`);
 
-    if (S.format === 'commander') {
+    if (S.format === 'commander' && !compact) {
       const sources = new Map();
       for (const c of Object.values(S.cards)) if (c.isCommander && c.owner !== p.id && !c.isToken) sources.set(c.id, c);
       for (const id of Object.keys(p.cmdDamage || {})) if (S.cards[id]) sources.set(id, S.cards[id]);
@@ -395,28 +556,27 @@
         rows.push('<div class="sect-title">Commander damage taken</div>');
         for (const c of sources.values()) {
           const v = (p.cmdDamage || {})[c.id] || 0;
-          rows.push(`<div class="kv" title="${esc(c.name)}"><span class="k">${esc(c.name)}</span><span class="v" style="${v >= 21 ? 'color:var(--bad)' : ''}">${v}</span>
+          const owner = playerById(c.owner);
+          rows.push(`<div class="kv" title="${esc(c.name)}"><span class="k">${esc(owner ? owner.name : '?')} · ${esc(c.name)}</span><span class="v" style="${v >= 21 ? 'color:var(--bad)' : ''}">${v}</span>
             <button class="btn tiny" data-act="cmd" data-pid="${p.id}" data-src="${c.id}" data-d="-1">−</button>
             <button class="btn tiny" data-act="cmd" data-pid="${p.id}" data-src="${c.id}" data-d="1">+</button></div>`);
         }
       }
     }
 
-    if (!isMe) {
+    if (!isMe || compact) {
       const z = p.zones;
-      rows.push(`<div class="zones">
-        <button class="zbtn" data-act="zone" data-pid="${p.id}" data-zone="hand" data-drop="zone" data-zone-target="hand">Hand <b>${p.handCount}</b></button>
-        <button class="zbtn" data-act="zone" data-pid="${p.id}" data-zone="library" data-drop="zone" data-zone-target="library">Library <b>${p.libraryCount}</b></button>
-        <button class="zbtn" data-act="zone" data-pid="${p.id}" data-zone="graveyard" data-drop="zone" data-zone-target="graveyard">Grave <b>${z.graveyard.length}</b></button>
-        <button class="zbtn" data-act="zone" data-pid="${p.id}" data-zone="exile" data-drop="zone" data-zone-target="exile">Exile <b>${z.exile.length}</b></button>
-        ${S.format === 'commander' || z.command.length ? `<button class="zbtn" data-act="zone" data-pid="${p.id}" data-zone="command" data-drop="zone" data-zone-target="command">Command <b>${z.command.length}</b></button>` : ''}
-      </div>`);
+      const zb = (zone, label, count) =>
+        `<button class="zbtn" data-act="zone" data-pid="${p.id}" data-zone="${zone}" data-drop="zone" data-zone-target="${zone}">${label} <b>${count}</b></button>`;
+      rows.push(`<div class="zones">${zb('hand', 'Hand', p.handCount)}${zb('library', 'Library', p.libraryCount)}${zb('graveyard', 'Grave', z.graveyard.length)}${zb(
+        'exile',
+        'Exile',
+        z.exile.length,
+      )}${S.format === 'commander' || z.command.length ? zb('command', 'Cmd', z.command.length) : ''}</div>`);
       const flags = [];
       if (p.handRevealed) flags.push('hand revealed');
       if (p.revealTop) flags.push('top of library revealed');
       if (flags.length) rows.push(`<div class="muted small">${flags.join(' · ')}</div>`);
-      if (p.topCard && S.cards[p.topCard])
-        rows.push(`<div class="muted small">Top card: <a href="${esc(scryfallUrl(S.cards[p.topCard]))}" target="_blank" rel="noopener">${esc(S.cards[p.topCard].name)}</a></div>`);
     } else {
       rows.push(`<div class="muted small">Hand ${p.handCount} · Library ${p.libraryCount}${p.handRevealed ? ' · hand revealed' : ''}</div>`);
     }
@@ -426,11 +586,12 @@
   function renderCenter() {
     const active = playerById(S.turn.active);
     const mineTurn = S.turn.active === S.you;
-    $('#turn-label').innerHTML = `Turn ${S.turn.number} · ${active ? (mineTurn ? '<span style="color:var(--accent)">Your turn</span>' : `${esc(active.name)}'s turn`) : '—'}`;
-    $('#phases').innerHTML = S.phases
-      .map((ph, i) => `<span class="phase ${i === S.turn.phase ? 'on' : ''}" data-act="phase" data-i="${i}">${esc(ph)}</span>`)
-      .join('');
-    $('#btn-pass').textContent = mineTurn ? 'Pass turn ▶' : `End ${active ? active.name : ''}'s turn ▶`;
+    $('#turn-label').innerHTML = active
+      ? `Turn ${S.turn.number} · ${mineTurn ? '<span style="color:var(--accent)">Your turn</span>' : `${esc(active.name)}'s turn`}`
+      : '<span class="muted">Load decks, then Start game</span>';
+    $('#btn-pass').disabled = !active;
+    $('#phases').innerHTML = S.phases.map((ph, i) => `<span class="phase ${i === S.turn.phase ? 'on' : ''}" data-act="phase" data-i="${i}">${esc(ph)}</span>`).join('');
+    $('#btn-pass').textContent = !active || mineTurn ? 'Pass turn ▶' : `End ${active.name}'s turn ▶`;
     reconcile($('#stack'), S.stack, (id, el) => cardEl(S.cards[id], el, 'stack'));
   }
 
@@ -449,13 +610,8 @@
     const pile = (zone, label, count, inner, extra = '') =>
       `<div class="pile ${extra}"><div class="slot" data-drop="zone" data-zone-target="${zone}" data-pile="${zone}">${inner || label}</div>
         <div class="lbl">${label} <b>${count}</b></div></div>`;
-
     const libTop = mine.revealTop && mine.topCard && S.cards[mine.topCard];
-    const libInner = mine.libraryCount
-      ? libTop
-        ? `<div class="card" data-id="${libTop.id}" data-ctx="libtop" style="left:-2px;top:-2px"><img src="${esc(libTop.img)}" draggable="false" alt=""></div>`
-        : '<div class="back">✦</div>'
-      : '';
+    const libInner = mine.libraryCount ? (libTop ? cardHTML(libTop, 'libtop') : '<div class="back">✦</div>') : '';
     const gy = top(z.graveyard);
     const ex = top(z.exile);
     const cmd = z.command.map((id) => S.cards[id]).filter(Boolean);
@@ -466,17 +622,18 @@
     $('#piles').innerHTML = html;
   }
 
-  function renderLog() {
-    const log = $('#log');
+  function renderLog(log) {
+    if (!log) return;
     const entries = S.log || [];
     const firstId = entries.length ? entries[0].id : 0;
-    if (!entries.length || firstId > lastLogId + 1 || entries[entries.length - 1].id < lastLogId) {
+    let last = Number(log.dataset.last || 0);
+    if (!entries.length || firstId > last + 1 || entries[entries.length - 1].id < last) {
       log.innerHTML = '';
-      lastLogId = 0;
+      last = 0;
     }
     const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
     for (const e of entries) {
-      if (e.id <= lastLogId) continue;
+      if (e.id <= last) continue;
       const d = document.createElement('div');
       d.className = `e ${e.kind ? `k-${e.kind}` : ''}`;
       const time = new Date(e.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -485,34 +642,38 @@
           ? `<span class="t">${time}</span><b style="color:${esc(e.color)}">${esc(e.who)}:</b> ${esc(e.text)}`
           : `<span class="t">${time}</span>${esc(e.text)}`;
       log.appendChild(d);
-      lastLogId = e.id;
+      last = e.id;
     }
+    log.dataset.last = String(last);
     if (nearBottom) log.scrollTop = log.scrollHeight;
   }
 
   /* -------------------------------------------------------------- cards */
 
+  function faceBadges(c) {
+    const out = [];
+    const net = ((c.counters || {})['+1/+1'] || 0) - ((c.counters || {})['-1/-1'] || 0);
+    if (net) out.push(`<span class="cb ctr ${net < 0 ? 'neg' : ''}"><i class="dot"></i>${sign(net)}/${sign(net)}</span>`);
+    if ((c.counters || {}).charge) out.push(`<span class="cb chg">${BOLT}${c.counters.charge}</span>`);
+    const fx = c.stats && c.stats.fx;
+    if (fx && (fx.p || fx.t)) out.push(`<span class="cb fx">${SPARK}${sign(fx.p)}/${sign(fx.t)}</span>`);
+    return out.length ? `<div class="cbadges">${out.join('')}</div>` : '';
+  }
+
   function cardInner(c) {
     if (!c) return '<div class="back">?</div>';
-    if (c.hidden) return '<div class="back">✦</div>';
+    if (c.hidden) return `<div class="back">✦</div>${faceBadges(c)}`;
     const src = c.flipped && c.backImg ? c.backImg : c.img;
     const shownName = c.flipped && c.backName ? c.backName : c.name;
     let html = src
       ? `<img src="${esc(src)}" alt="${esc(shownName)}" draggable="false" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'fallback',textContent:this.alt}))" ${c.faceDown ? 'style="opacity:.45;filter:grayscale(1)"' : ''}>`
-      : `<div class="fallback">${esc(shownName)}<span class="tl">${esc(c.typeLine || '')}</span>${c.pt ? `<span class="tl">${esc(c.pt)}</span>` : ''}</div>`;
+      : `<div class="fallback">${esc(shownName)}<span class="tl">${esc(c.manaCost || '')}</span><span class="tl">${esc(c.typeLine || '')}</span>${c.pt ? `<span class="tl">${esc(c.pt)}</span>` : ''}</div>`;
     const tags = [];
     if (c.faceDown) tags.push('<span class="tag">face-down</span>');
     if (c.isToken) tags.push('<span class="tag token">token</span>');
     if (c.isCommander && c.zone === 'command' && c.castCount) tags.push(`<span class="tag tax">tax +${c.castCount * 2}</span>`);
     if (tags.length) html += `<div class="tags">${tags.join('')}</div>`;
-    const ctr = Object.entries(c.counters || {});
-    if (ctr.length)
-      html += `<div class="badges">${ctr
-        .map(([k, v]) => {
-          const l = counterLabel(k, v);
-          return `<span class="badge ${l.cls}">${esc(l.text)}</span>`;
-        })
-        .join('')}</div>`;
+    if (c.zone === 'battlefield') html += faceBadges(c);
     if (c.note) html += `<div class="note">${esc(c.note)}</div>`;
     return html;
   }
@@ -522,8 +683,8 @@
   }
 
   /** Create or update a card element (keeps the same element so images don't reload). */
-  function cardEl(c, el, ctx) {
-    if (!el) {
+  function cardEl(c, el, ctx, posOverride) {
+    if (!el || !el.classList.contains('card')) {
       el = document.createElement('div');
       el.className = 'card';
     }
@@ -531,10 +692,13 @@
     el.dataset.id = c.id;
     el.dataset.ctx = ctx;
     if (ctx === 'bf') {
-      el.style.left = `${c.x}px`;
-      el.style.top = `${c.y}px`;
+      const pos = posOverride || c;
+      el.style.left = `${pos.x}px`;
+      el.style.top = `${pos.y}px`;
+      el.classList.toggle('attached', !!posOverride);
     }
     el.classList.toggle('tapped', ctx === 'bf' && !!c.tapped);
+    el.classList.toggle('selected', !!(mode && mode.kind === 'proliferate' && mode.cards.has(c.id)));
     const inner = cardInner(c);
     if (el._sig !== inner) {
       el.innerHTML = inner;
@@ -558,6 +722,33 @@
       prev = el;
     }
     for (const el of existing.values()) el.remove();
+  }
+
+  /* ---------------------------------------------------------- summaries */
+
+  /** The detailed info shown beside a hovered (or tapped) card. */
+  function summaryHTML(c) {
+    if (!c || c.hidden) return '';
+    const rows = [`<b class="sn">${esc(c.flipped && c.backName ? c.backName : c.name)}</b>`];
+    const tl = c.flipped && c.backTypeLine ? c.backTypeLine : c.typeLine;
+    if (tl) rows.push(`<div class="muted">${esc(tl)}${c.manaCost && !c.flipped ? ` · ${esc(c.manaCost)}` : ''}</div>`);
+    const st = c.stats;
+    if (st && st.total) {
+      rows.push(`<div class="pt-total">${esc(st.total)}${st.parts.length ? ` <span class="muted">(printed ${esc(st.base)})</span>` : ''}</div>`);
+      for (const part of st.parts) rows.push(`<div class="small">${sign(part.p)}/${sign(part.t)} <span class="muted">${esc(part.src)}</span></div>`);
+    }
+    const ctr = Object.entries(c.counters || {});
+    if (ctr.length) rows.push(`<div class="sect-title">Counters</div>${ctr.map(([k, v]) => `<div class="small">${esc(counterLabel(k, v))}${k === '+1/+1' || k === '-1/-1' ? '' : ''}</div>`).join('')}`);
+    if (st && st.keywords && st.keywords.length)
+      rows.push(`<div class="sect-title">Has</div>${st.keywords.map((k) => `<div class="small"><b>${esc(k.keyword)}</b> <span class="muted">from ${esc(k.src)}</span></div>`).join('')}`);
+    if (c.attachedTo && S.cards[c.attachedTo]) rows.push(`<div class="small">Attached to <b>${esc(S.cards[c.attachedTo].name)}</b></div>`);
+    const att = Object.values(S.cards).filter((x) => x.attachedTo === c.id);
+    if (att.length) rows.push(`<div class="small">Attached: ${att.map((x) => `<b>${esc(x.name)}</b>`).join(', ')}</div>`);
+    if ((c.effects || []).length)
+      rows.push(`<div class="sect-title">This card's effects</div>${c.effects.map((e) => `<div class="small ${e.on ? '' : 'muted'}">${esc(E.describeEffect(e))}${e.on ? '' : ' (off)'}</div>`).join('')}`);
+    if (c.isCommander && c.castCount) rows.push(`<div class="small">Commander tax: <b>+${c.castCount * 2}</b></div>`);
+    if (c.note) rows.push(`<div class="small">Note: ${esc(c.note)}</div>`);
+    return rows.join('');
   }
 
   /* -------------------------------------------------------- battlefield */
@@ -585,19 +776,15 @@
     });
   }
 
-  function bfEl(pid) {
-    return $(`.bf[data-pid="${pid}"]`);
-  }
+  const bfEls = (pid) => $$(`.bf[data-pid="${pid}"]`).filter((b) => b.offsetParent !== null);
 
   function applyView(pid) {
-    const bf = bfEl(pid);
-    if (!bf) return;
     const v = views[pid];
-    bf.querySelector('.bf-table').style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.z})`;
+    for (const bf of $$(`.bf[data-pid="${pid}"]`)) bf.querySelector('.bf-table').style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.z})`;
   }
 
   function fitView(pid) {
-    const bf = bfEl(pid);
+    const bf = bfEls(pid)[0];
     if (!bf || !S) return;
     const r = bf.getBoundingClientRect();
     if (!r.width || !r.height) return;
@@ -607,7 +794,7 @@
   }
 
   function zoomAt(pid, factor, cx, cy) {
-    const bf = bfEl(pid);
+    const bf = bfEls(pid)[0];
     const v = views[pid];
     if (!bf || !v) return;
     const r = bf.getBoundingClientRect();
@@ -621,6 +808,420 @@
     applyView(pid);
   }
 
+  /* =============================================================== dice */
+
+  const diceSeen = {};
+  const animating = new Set();
+
+  function dieEl(d, el, pid) {
+    if (!el || !el.classList.contains('die')) {
+      el = document.createElement('div');
+      el.className = 'die';
+      el.innerHTML = `${D20_SVG}<span class="dn"></span>`;
+    }
+    if (!d) return el;
+    el.dataset.die = d.id;
+    el.dataset.pid = pid;
+    el.classList.toggle('mine', d.owner === S.you);
+    el.style.setProperty('--dc', (playerById(d.owner) || {}).color || '#d6a531');
+    if (d.seq && diceSeen[d.id] !== d.seq) {
+      diceSeen[d.id] = d.seq;
+      if (!firstState) {
+        animateDie(el, E.simulateDie(d.sx, d.sy, d.vx, d.vy, S.table.w, S.table.h), d.value, `bf:${d.id}`);
+        return el;
+      }
+    }
+    if (!animating.has(`bf:${d.id}`)) {
+      el.style.left = `${d.x}px`;
+      el.style.top = `${d.y}px`;
+      el.querySelector('.dn').textContent = d.value == null ? '?' : String(d.value);
+      el.classList.toggle('rolled', d.value != null);
+    }
+    return el;
+  }
+
+  /** Play a die's tumble: positions from the shared simulation, numbers flicker until it stops. */
+  function animateDie(el, frames, value, key) {
+    if (document.hidden) {
+      // tab not visible: just show where it landed
+      const [x, y] = frames[frames.length - 1];
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      el.querySelector('.dn').textContent = String(value);
+      el.classList.add('rolled');
+      return;
+    }
+    animating.add(key);
+    el.classList.add('rolling');
+    el.classList.remove('rolled');
+    const num = el.querySelector('.dn');
+    const start = performance.now();
+    let lastFlip = -1;
+    const step = (now) => {
+      const i = Math.max(0, Math.min(frames.length - 1, Math.floor(((now - start) / 1000) * 60)));
+      const [x, y, rot] = frames[i];
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      el.style.transform = `rotate(${rot}deg)`;
+      const remaining = frames.length - i;
+      const every = remaining > 40 ? 3 : remaining > 15 ? 6 : 10;
+      if (Math.floor(i / every) !== lastFlip) {
+        lastFlip = Math.floor(i / every);
+        num.textContent = String(1 + Math.floor(Math.random() * 20));
+      }
+      if (i < frames.length - 1) requestAnimationFrame(step);
+      else {
+        num.textContent = String(value);
+        el.style.transform = '';
+        el.classList.remove('rolling');
+        el.classList.add('rolled', 'landed');
+        setTimeout(() => el.classList.remove('landed'), 600);
+        animating.delete(key);
+      }
+    };
+    requestAnimationFrame(step);
+  }
+
+  /** Track a flick gesture on an element; calls done({vx, vy, moved, dx, dy}) in px/second. */
+  function trackFlick(e, onMove, done) {
+    const samples = [[performance.now(), e.clientX, e.clientY]];
+    const sx = e.clientX;
+    const sy = e.clientY;
+    const move = (ev) => {
+      samples.push([performance.now(), ev.clientX, ev.clientY]);
+      if (samples.length > 12) samples.shift();
+      if (onMove) onMove(ev.clientX - sx, ev.clientY - sy);
+    };
+    const up = (ev) => {
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', up);
+      document.removeEventListener('pointercancel', up);
+      const now = performance.now();
+      const recent = samples.filter((s) => now - s[0] < 110);
+      const first = recent[0] || samples[0];
+      const dt = Math.max(16, now - first[0]);
+      const vx = ((ev.clientX - first[1]) / dt) * 1000;
+      const vy = ((ev.clientY - first[2]) / dt) * 1000;
+      done({ vx, vy, moved: Math.hypot(ev.clientX - sx, ev.clientY - sy) > 8, dx: ev.clientX - sx, dy: ev.clientY - sy });
+    };
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+    document.addEventListener('pointercancel', up);
+  }
+
+  function randomFlick() {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 1400 + Math.random() * 1400;
+    return { vx: Math.cos(a) * sp, vy: Math.sin(a) * sp };
+  }
+
+  /** Pointer down on a battlefield die. */
+  function onDieDown(e, el) {
+    const d = S.dice[el.dataset.die];
+    if (!d || d.owner !== S.you || animating.has(`bf:${d.id}`)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const z = (views[el.dataset.pid] || { z: 1 }).z;
+    const ox = d.x;
+    const oy = d.y;
+    trackFlick(
+      e,
+      (dx, dy) => {
+        el.style.left = `${clamp(ox + dx / z, 0, S.table.w - 70)}px`;
+        el.style.top = `${clamp(oy + dy / z, 0, S.table.h - 70)}px`;
+      },
+      ({ vx, vy, moved, dx, dy }) => {
+        const x = clamp(ox + dx / z, 0, S.table.w - 70);
+        const y = clamp(oy + dy / z, 0, S.table.h - 70);
+        const speed = Math.hypot(vx, vy);
+        if (!moved && d.value != null) return act({ type: 'removeDie', dieId: d.id });
+        if (speed < 250) {
+          if (!moved) {
+            const f = randomFlick();
+            return act({ type: 'rollDie', dieId: d.id, x, y, vx: f.vx / z / 2, vy: f.vy / z / 2 });
+          }
+          el.style.left = `${ox}px`;
+          el.style.top = `${oy}px`;
+          return toast('Flick the die (a quick swipe) to roll it.');
+        }
+        act({ type: 'rollDie', dieId: d.id, x, y, vx: vx / z, vy: vy / z });
+      },
+    );
+  }
+
+  /* ========================================== opening hands + turn order */
+
+  let setupDismissedKey = null;
+  const traySeen = {};
+
+  function setupKey() {
+    return S.setup ? `${S.setup.rollers.join()}|${JSON.stringify(S.setup.results)}` : null;
+  }
+
+  function renderSetup() {
+    const box = $('#setup');
+    const st = S.setup;
+    if (!st || (st.stage === 'done' && setupDismissedKey === setupKey())) {
+      box.hidden = true;
+      box.innerHTML = '';
+      box.dataset.stage = '';
+      return;
+    }
+    box.hidden = false;
+    if (st.stage === 'mulligan') {
+      box.className = 'setup mull';
+      const mine = st.rollers.includes(S.you);
+      const kept = st.kept[S.you];
+      box.dataset.stage = 'mulligan';
+      box.innerHTML = `<div class="setup-card">
+        <b>Opening hands</b>
+        <div class="who">${st.rollers
+          .map((id) => {
+            const p = playerById(id);
+            const m = st.mulls[id] || 0;
+            return `<span class="${st.kept[id] ? 'ok' : ''}">${esc(p ? p.name : '?')}: ${st.kept[id] ? 'kept ✓' : 'deciding…'}${m ? ` (${m} mulligan${m === 1 ? '' : 's'})` : ''}</span>`;
+          })
+          .join('')}</div>
+        ${mine && !kept ? '<div class="row gap"><button class="btn" data-setup="mulligan">Mulligan (shuffle &amp; draw 7)</button><button class="btn primary" data-setup="keep">Keep hand</button></div>' : mine ? '<div class="muted small">Waiting for everyone to keep…</div>' : ''}
+      </div>`;
+      return;
+    }
+    // roll / done: the dice tray
+    box.className = 'setup tray-mode';
+    if (box.dataset.stage !== 'tray') {
+      box.dataset.stage = 'tray';
+      box.innerHTML = `<div class="tray-wrap"><div class="tray-head"></div>
+        <div class="tray-box"><div class="tray" style="width:${S.tray.w}px;height:${S.tray.h}px"></div></div>
+        <div class="tray-foot"></div></div>`;
+      fitTray();
+    }
+    const tray = $('.tray', box);
+    st.rollers.forEach((id, idx) => {
+      let el = tray.querySelector(`.die[data-roller="${id}"]`);
+      const p = playerById(id);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'die big';
+        el.dataset.roller = id;
+        el.innerHTML = `${D20_SVG}<span class="dn">?</span><span class="dname"></span>`;
+        el.style.left = `${60 + idx * ((S.tray.w - 200) / Math.max(1, st.rollers.length - 1 || 1))}px`;
+        el.style.top = `${S.tray.h - 110}px`;
+        tray.appendChild(el);
+      }
+      el.style.setProperty('--dc', p ? p.color : '#888');
+      el.querySelector('.dname').textContent = p ? (id === S.you ? 'You' : p.name) : '?';
+      const anim = st.anims[id];
+      const can = st.stage === 'roll' && st.eligible.includes(id);
+      el.classList.toggle('mine', id === S.you && can);
+      el.classList.toggle('waiting', can);
+      if (anim && traySeen[id] !== anim.seq) {
+        traySeen[id] = anim.seq;
+        if (!firstState) animateDie(el, E.simulateDie(anim.sx, anim.sy, anim.vx, anim.vy, S.tray.w, S.tray.h), anim.value, `tray:${id}`);
+        else {
+          const last = E.simulateDie(anim.sx, anim.sy, anim.vx, anim.vy, S.tray.w, S.tray.h).pop();
+          el.style.left = `${last[0]}px`;
+          el.style.top = `${last[1]}px`;
+          el.querySelector('.dn').textContent = String(anim.value);
+          el.classList.add('rolled');
+        }
+      } else if (can && anim && !animating.has(`tray:${id}`)) {
+        el.querySelector('.dn').textContent = '?';
+        el.classList.remove('rolled');
+      }
+    });
+    const head = $('.tray-head', box);
+    const foot = $('.tray-foot', box);
+    if (st.stage === 'roll') {
+      const myTurn = st.eligible.includes(S.you);
+      head.innerHTML = `<b>Roll for turn order${st.round > 1 ? ' (tie, roll again!)' : ''}</b><span class="muted">${myTurn ? 'Flick your die. Swipe it quickly in any direction.' : 'Waiting for the others to roll…'}</span>`;
+      foot.innerHTML = '';
+    } else {
+      const names = S.order.map((id) => esc((playerById(id) || {}).name || '?'));
+      head.innerHTML = `<b>${names[0]} goes first!</b><span class="muted">Turn order: ${names.join(' → ')}</span>`;
+      if (!foot.innerHTML) foot.innerHTML = '<button class="btn primary" data-setup="close">Let\'s play</button>';
+    }
+  }
+
+  function fitTray() {
+    const box = $('#setup .tray-box');
+    const tray = $('#setup .tray');
+    if (!box || !tray || !S) return;
+    const r = box.getBoundingClientRect();
+    const z = Math.min(r.width / S.tray.w, r.height / S.tray.h);
+    tray.style.transform = `scale(${z})`;
+    tray.dataset.z = String(z);
+    box.style.setProperty('--tz', z);
+  }
+  window.addEventListener('resize', fitTray);
+
+  $('#setup').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-setup]');
+    if (!b) return;
+    if (b.dataset.setup === 'mulligan') act({ type: 'mulligan' });
+    if (b.dataset.setup === 'keep') act({ type: 'keep' });
+    if (b.dataset.setup === 'close') {
+      setupDismissedKey = setupKey();
+      renderSetup();
+    }
+  });
+
+  $('#setup').addEventListener('pointerdown', (e) => {
+    const el = e.target.closest('.die.mine');
+    if (!el || !S.setup || S.setup.stage !== 'roll') return;
+    e.preventDefault();
+    const tray = $('#setup .tray');
+    const z = Number(tray.dataset.z || 1);
+    const ox = parseFloat(el.style.left);
+    const oy = parseFloat(el.style.top);
+    trackFlick(
+      e,
+      (dx, dy) => {
+        el.style.left = `${clamp(ox + dx / z, 0, S.tray.w - 70)}px`;
+        el.style.top = `${clamp(oy + dy / z, 0, S.tray.h - 70)}px`;
+      },
+      ({ vx, vy, moved }) => {
+        el.style.left = `${ox}px`;
+        el.style.top = `${oy}px`;
+        let f = { vx: vx / z, vy: vy / z };
+        if (Math.hypot(vx, vy) < 250) {
+          if (moved) return toast('Flick it! A quick swipe rolls the die.');
+          f = randomFlick();
+        }
+        act({ type: 'rollInitiative', ...f });
+      },
+    );
+  });
+
+  /* =========================================================== requests */
+
+  const shownRequests = new Set();
+
+  function renderRequests() {
+    const mineOut = (S.requests || []).filter((r) => r.from === S.you);
+    const incoming = (S.requests || []).filter((r) => r.to === S.you);
+    const banners = $('#banners');
+    for (const el of $$('.req-out', banners)) if (!mineOut.some((r) => r.id === el.dataset.req)) el.remove();
+    for (const r of mineOut) {
+      if ($(`.req-out[data-req="${r.id}"]`, banners)) continue;
+      const to = playerById(r.to);
+      const div = document.createElement('div');
+      div.className = 'banner req-out';
+      div.dataset.req = r.id;
+      div.innerHTML = `<span>Waiting for <b>${esc(to ? to.name : '?')}</b> to allow: ${esc(r.text)}</span><button class="btn small" data-cancel="${r.id}">Cancel</button>`;
+      banners.appendChild(div);
+    }
+    for (const r of incoming) {
+      if (shownRequests.has(r.id)) continue;
+      shownRequests.add(r.id);
+      const from = playerById(r.from);
+      dialog({
+        title: `${from ? from.name : 'Someone'} is asking`,
+        body: `<p class="req-text">${esc(from ? from.name : 'Someone')} wants to <b>${esc(r.text)}</b>.</p>`,
+        buttons: [
+          { label: 'Deny', value: 'deny', cls: 'deny' },
+          { label: 'Allow', value: 'allow', cls: 'allow' },
+        ],
+        noDismiss: true,
+        onMount(root, close) {
+          root.dataset.req = r.id;
+          root.classList.add('req-modal');
+          // close automatically if the request disappears (cancelled / answered elsewhere)
+          const timer = setInterval(() => {
+            if (!S || !(S.requests || []).some((x) => x.id === r.id)) {
+              clearInterval(timer);
+              close('gone');
+            }
+          }, 500);
+        },
+      }).then(({ value }) => {
+        if (value === 'allow' || value === 'deny') act({ type: 'respond', requestId: r.id, allow: value === 'allow' });
+      });
+    }
+  }
+
+  $('#banners').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-cancel]');
+    if (b) act({ type: 'cancelRequest', requestId: b.dataset.cancel });
+    const m = e.target.closest('[data-mode]');
+    if (m) {
+      if (m.dataset.mode === 'done') finishMode();
+      else cancelMode();
+    }
+  });
+
+  /* ======================================== proliferate / attach modes */
+
+  function startProliferate() {
+    mode = { kind: 'proliferate', cards: new Set(), players: new Set() };
+    hideMenu();
+    render();
+  }
+
+  function startAttach(c) {
+    mode = { kind: 'attach', cardId: c.id, name: c.name };
+    hideMenu();
+    render();
+  }
+
+  function cancelMode() {
+    mode = null;
+    render();
+  }
+
+  function finishMode() {
+    if (mode && mode.kind === 'proliferate') act({ type: 'proliferate', cardIds: [...mode.cards], playerIds: [...mode.players] });
+    mode = null;
+    render();
+  }
+
+  /** Returns true if the click was used by a mode. */
+  function modeClick(target) {
+    if (!mode) return false;
+    if (mode.kind === 'proliferate') {
+      const cardEl2 = target.closest('.card[data-id]');
+      const pl = target.closest('[data-act="pick-player"], .plife[data-pid]');
+      if (cardEl2) {
+        const c = getCard(cardEl2.dataset.id);
+        if (c && c.zone === 'battlefield') mode.cards.has(c.id) ? mode.cards.delete(c.id) : mode.cards.add(c.id);
+      } else if (pl) {
+        const id = pl.dataset.pid;
+        mode.players.has(id) ? mode.players.delete(id) : mode.players.add(id);
+      } else return false;
+      render();
+      return true;
+    }
+    if (mode.kind === 'attach') {
+      const cardEl2 = target.closest('.card[data-id]');
+      if (!cardEl2) return false;
+      const t = getCard(cardEl2.dataset.id);
+      if (!t || t.zone !== 'battlefield' || t.id === mode.cardId) return true;
+      act({ type: 'attach', cardId: mode.cardId, targetId: t.id });
+      mode = null;
+      render();
+      return true;
+    }
+    return false;
+  }
+
+  function renderModeBanner() {
+    const banners = $('#banners');
+    let el = $('.mode-banner', banners);
+    if (!mode) {
+      if (el) el.remove();
+      return;
+    }
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'banner mode-banner';
+      banners.prepend(el);
+    }
+    el.innerHTML =
+      mode.kind === 'proliferate'
+        ? `<span><b>Proliferate:</b> ${U.phone ? 'tap' : 'click'} permanents and players with counters (${mode.cards.size + mode.players.size} picked)</span>
+           <button class="btn small primary" data-mode="done">Done</button><button class="btn small" data-mode="cancel">Cancel</button>`
+        : `<span><b>Attach ${esc(mode.name)}:</b> ${U.phone ? 'tap' : 'click'} the creature to attach it to</span><button class="btn small" data-mode="cancel">Cancel</button>`;
+  }
+
   /* ================================================== pointer: drag / pan */
 
   let drag = null;
@@ -632,10 +1233,13 @@
   }
 
   document.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
+    if (U.phone || e.button !== 0 || $('#game').hidden) return;
     hideMenu(e);
+    const dieE = e.target.closest('.bf .die');
+    if (dieE) return onDieDown(e, dieE);
     const el = e.target.closest('.card[data-id]');
-    if (el && !el.closest('.token-results')) {
+    if (el && !el.closest('.token-results') && !el.closest('.modal')) {
+      if (mode) return;
       const c = getCard(el.dataset.id);
       if (!c) return;
       const r = el.getBoundingClientRect();
@@ -653,14 +1257,14 @@
       return;
     }
     const bf = e.target.closest('.bf');
-    if (bf && !e.target.closest('.bf-controls')) {
+    if (bf && !e.target.closest('.bf-controls') && !e.target.closest('.ppanel')) {
       const v = views[bf.dataset.pid];
       pan = { pid: bf.dataset.pid, bf, sx: e.clientX, sy: e.clientY, ox: v.x, oy: v.y };
       bf.classList.add('panning');
       e.preventDefault();
     }
     const vh = e.target.closest('.viewer .vh');
-    if (vh && !e.target.closest('button')) {
+    if (vh && !e.target.closest('button, input')) {
       const box = $('#viewer').getBoundingClientRect();
       pan = { viewer: true, sx: e.clientX, sy: e.clientY, ox: box.left, oy: box.top };
       e.preventDefault();
@@ -669,6 +1273,7 @@
 
   let lastHoverTarget = null;
   document.addEventListener('pointermove', (e) => {
+    if (U.phone) return;
     if (pan) {
       if (pan.viewer) {
         const v = $('#viewer');
@@ -712,6 +1317,7 @@
   });
 
   document.addEventListener('pointerup', (e) => {
+    if (U.phone) return;
     if (pan) {
       if (pan.bf) pan.bf.classList.remove('panning');
       pan = null;
@@ -724,7 +1330,6 @@
     if (lastHoverTarget) lastHoverTarget.classList.remove('drop-hover');
     lastHoverTarget = null;
     if (!d.started) {
-      // a plain click
       if (d.ctx === 'bf') act({ type: 'tap', cardId: d.id });
       else if (d.ctx === 'pile') {
         const pileEl = d.el.closest('[data-pile]');
@@ -734,21 +1339,34 @@
     }
     d.el.classList.remove('dragging-src');
     if (d.ghost) d.ghost.remove();
-    const t = dropTargetAt(e.clientX, e.clientY);
-    if (t) dropOn(d, t, e.clientX, e.clientY);
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    const t = under ? under.closest('[data-drop]') : null;
+    if (t) dropOn(d, t, e.clientX, e.clientY, under);
   });
 
-  function dropOn(d, t, cx, cy) {
+  async function dropOn(d, t, cx, cy, under) {
     const c = d.card;
     switch (t.dataset.drop) {
       case 'bf': {
         const pid = t.dataset.player;
+        const targetCard = under && under.closest('.card[data-id]');
+        if (targetCard && targetCard.dataset.id !== c.id && isEquipLike(c)) {
+          const host = getCard(targetCard.dataset.id);
+          if (host && host.zone === 'battlefield') {
+            if (c.zone !== 'battlefield') {
+              const r = await act({ type: 'move', cardId: c.id, to: 'battlefield', playerId: S.you });
+              if (r.error) return;
+            }
+            return act({ type: 'attach', cardId: c.id, targetId: host.id });
+          }
+        }
         const r = t.getBoundingClientRect();
         const z = views[pid].z;
         const x = clamp((cx - r.left) / z - d.offX, 0, S.table.w - S.table.cardW);
         const y = clamp((cy - r.top) / z - d.offY, 0, S.table.h - S.table.cardH);
         if (c.zone === 'battlefield' && c.zp === pid) {
-          d.el.style.left = `${x}px`; // feel instant
+          if (c.attachedTo) await act({ type: 'unattach', cardId: c.id });
+          d.el.style.left = `${x}px`;
           d.el.style.top = `${y}px`;
           act({ type: 'position', cardId: c.id, x, y });
         } else act({ type: 'move', cardId: c.id, to: 'battlefield', playerId: pid, x, y });
@@ -760,9 +1378,12 @@
         act({ type: 'move', cardId: c.id, to, pos: 'top' });
         break;
       }
-      case 'hand':
-        if (c.zone !== 'hand' || c.zp !== S.you) act({ type: 'move', cardId: c.id, to: 'hand' });
+      case 'hand': {
+        const index = handIndexAt(cx, c.id);
+        if (c.zone === 'hand' && c.zp === S.you) act({ type: 'reorderHand', cardId: c.id, index });
+        else act({ type: 'move', cardId: c.id, to: 'hand', pos: index });
         break;
+      }
       case 'stack':
         if (c.zone !== 'stack') act({ type: 'move', cardId: c.id, to: 'stack' });
         break;
@@ -771,26 +1392,44 @@
     }
   }
 
+  /** Where in the hand a card dropped at screen x should go. */
+  function handIndexAt(cx, skipId, container = $('#hand')) {
+    const els = $$('.card[data-id]', container).filter((el) => el.dataset.id !== skipId);
+    let i = 0;
+    for (const el of els) {
+      const r = el.getBoundingClientRect();
+      if (cx > r.left + r.width / 2) i++;
+    }
+    return i;
+  }
+
   document.addEventListener('dblclick', (e) => {
+    if (U.phone || mode) return;
     const el = e.target.closest('.card[data-id]');
     if (!el) return;
     const c = getCard(el.dataset.id);
     if (!c) return;
     const ctx = el.dataset.ctx;
-    if (ctx === 'hand') act({ type: 'move', cardId: c.id, to: 'battlefield' });
-    else if (ctx === 'stack') resolveStack(c);
+    if (ctx === 'hand') playFromHand(c, 'battlefield');
+    else if (ctx === 'stack') resolveStack(c, true);
     else if (ctx === 'viewer') act({ type: 'move', cardId: c.id, to: 'hand' });
   });
 
-  function resolveStack(c) {
-    const permanent = /\b(Creature|Artifact|Enchantment|Planeswalker|Land|Battle)\b/.test(c.typeLine || '');
-    act({ type: 'move', cardId: c.id, to: permanent ? 'battlefield' : 'graveyard' });
+  function playFromHand(c, where) {
+    if (where === 'auto') where = isLandCard(c) ? 'battlefield' : 'stack';
+    return act({ type: 'move', cardId: c.id, to: where });
+  }
+
+  function resolveStack(c, resolves) {
+    if (!resolves) return act({ type: 'move', cardId: c.id, to: 'graveyard' });
+    const permanent = isPermanentCard(c);
+    return act({ type: 'move', cardId: c.id, to: permanent ? 'battlefield' : 'graveyard' });
   }
 
   /* ============================================================ preview */
 
   document.addEventListener('pointerover', (e) => {
-    if (e.pointerType !== 'mouse' || drag) return;
+    if (U.phone || e.pointerType !== 'mouse' || drag) return;
     const el = e.target.closest('.card[data-id]');
     if (!el || el.closest('.drag-ghost')) return;
     hoveredId = el.dataset.id;
@@ -810,15 +1449,16 @@
     const imgs = [];
     if (c.img) imgs.push(c.flipped && c.backImg ? c.backImg : c.img);
     if (c.backImg) imgs.push(c.flipped ? c.img : c.backImg);
-    const info = [];
-    if (c.note) info.push(`Note: ${c.note}`);
-    if (c.isCommander && c.castCount) info.push(`Commander tax: +${c.castCount * 2}`);
-    p.innerHTML = imgs.length
-      ? imgs.map((u) => `<img src="${esc(large(u))}" alt="">`).join('') + (info.length ? `<div class="pinfo">${esc(info.join(' · '))}</div>` : '')
-      : `<div class="ptext"><b>${esc(c.name)}</b><br><span class="muted">${esc(c.typeLine || '')}</span>${c.pt ? `<br>${esc(c.pt)}` : ''}</div>`;
+    const sum = c.zone === 'battlefield' || c.isCommander || c.note ? summaryHTML(c) : '';
+    p.innerHTML =
+      (sum ? `<div class="psum">${sum}</div>` : '') +
+      (imgs.length
+        ? imgs.map((u) => `<img src="${esc(large(u))}" alt="">`).join('')
+        : `<div class="ptext"><b>${esc(c.name)}</b><br><span class="muted">${esc(c.typeLine || '')}</span>${c.pt ? `<br>${esc(c.pt)}` : ''}<p class="small">${esc(c.oracle || '')}</p></div>`);
     p.hidden = false;
-    const w = imgs.length > 1 ? 608 : 300;
-    const left = cx < innerWidth / 2 ? innerWidth - w - (parseInt(getComputedStyle(document.documentElement).getPropertyValue('--side'), 10) || 0) - 20 : 16;
+    const w = p.getBoundingClientRect().width;
+    const side = $('#game').classList.contains('no-log') ? 0 : 290;
+    const left = cx < innerWidth / 2 ? innerWidth - w - side - 16 : 16;
     p.style.left = `${Math.max(8, left)}px`;
     p.style.top = '60px';
   }
@@ -828,44 +1468,66 @@
 
   /* ======================================================= context menus */
 
-  function showMenu(items, x, y) {
+  function showMenu(items, x, y, opts = {}) {
     const m = $('#menu');
-    m.innerHTML = '';
+    m.classList.toggle('sheet', !!U.phone);
+    let host = m;
+    if (U.phone) {
+      m.innerHTML = `<div class="sheet-bg"></div><div class="sheet-body">${opts.head ? `<div class="sheet-left">${opts.head}</div>` : ''}<div class="sheet-items"></div></div>`;
+      host = m.querySelector('.sheet-items');
+      m.querySelector('.sheet-bg').addEventListener('click', () => (m.hidden = true));
+      const close = document.createElement('button');
+      close.className = 'mi sheet-close';
+      close.textContent = '✕ Close';
+      close.addEventListener('click', () => (m.hidden = true));
+      host.appendChild(close);
+    } else m.innerHTML = opts.head || '';
     for (const it of items) {
       if (!it) continue;
       if (it.sep) {
-        m.insertAdjacentHTML('beforeend', '<div class="sep"></div>');
+        host.insertAdjacentHTML('beforeend', '<div class="sep"></div>');
         continue;
       }
       if (it.header) {
-        m.insertAdjacentHTML('beforeend', `<div class="mh">${esc(it.header)}</div>`);
+        host.insertAdjacentHTML('beforeend', `<div class="mh">${esc(it.header)}</div>`);
         continue;
       }
       if (it.href) {
-        m.insertAdjacentHTML('beforeend', `<a class="mi" href="${esc(it.href)}" target="_blank" rel="noopener">${esc(it.label)}</a>`);
+        host.insertAdjacentHTML('beforeend', `<a class="mi" href="${esc(it.href)}" target="_blank" rel="noopener">${esc(it.label)}</a>`);
         continue;
       }
       const b = document.createElement('button');
-      b.className = `mi ${it.disabled ? 'disabled' : ''}`;
+      b.className = `mi ${it.disabled ? 'disabled' : ''} ${it.cls || ''}`;
       b.textContent = it.label;
       b.addEventListener('click', () => {
         m.hidden = true;
         it.fn();
       });
-      m.appendChild(b);
+      host.appendChild(b);
     }
     m.hidden = false;
+    if (U.phone) {
+      m.style.left = '';
+      m.style.top = '';
+      return;
+    }
     const r = m.getBoundingClientRect();
     m.style.left = `${clamp(x, 4, innerWidth - r.width - 4)}px`;
     m.style.top = `${clamp(y, 4, innerHeight - r.height - 4)}px`;
   }
   function hideMenu(e) {
-    if (e && e.target.closest && e.target.closest('#menu')) return;
+    if (e && e.target && e.target.closest && e.target.closest('#menu')) return;
     $('#menu').hidden = true;
   }
-  document.addEventListener('scroll', () => hideMenu(), true);
+  document.addEventListener('scroll', (e) => {
+    if (!(e.target && e.target.closest && e.target.closest('#menu'))) hideMenu();
+  }, true);
 
   document.addEventListener('contextmenu', (e) => {
+    if (U.phone) {
+      e.preventDefault();
+      return;
+    }
     if ($('#game').hidden) return;
     if (e.target.closest('input, textarea')) return;
     const cardElm = e.target.closest('.card[data-id]');
@@ -888,21 +1550,31 @@
     const items = [];
     const onBf = c.zone === 'battlefield';
     items.push({ header: c.hidden ? 'Face-down card' : c.flipped && c.backName ? c.backName : c.name });
+    if (c.zone === 'stack') {
+      items.push({ label: '✓ Resolves', cls: 'go', fn: () => resolveStack(c, true) });
+      items.push({ label: "✗ Doesn't resolve (to graveyard)", cls: 'stop', fn: () => resolveStack(c, false) });
+    }
+    if (ctx === 'hand' && U.phone) {
+      items.push({ label: isLandCard(c) ? 'Play land' : 'Cast (to the stack)', cls: 'go', fn: () => playFromHand(c, 'auto') });
+      if (!isLandCard(c)) items.push({ label: 'Put straight onto the battlefield', fn: () => playFromHand(c, 'battlefield') });
+    }
     if (onBf) {
       items.push({ label: c.tapped ? 'Untap  (T)' : 'Tap  (T)', fn: () => act({ type: 'tap', cardId: c.id }) });
-      if (c.backImg) items.push({ label: 'Transform / flip  (F)', fn: () => act({ type: 'flip', cardId: c.id }) });
-      items.push({ label: c.faceDown ? 'Turn face up' : 'Turn face down', fn: () => act({ type: 'faceDown', cardId: c.id }) });
       items.push({ label: 'Counters…', fn: () => countersDialog(c.id) });
       items.push({ label: 'Add +1/+1 counter', fn: () => act({ type: 'cardCounter', cardId: c.id, name: '+1/+1', delta: 1 }) });
-      items.push({ label: c.note ? 'Edit note…' : 'Add note… (e.g. "+2/+2 until EOT")', fn: () => noteDialog(c) });
+      items.push({ label: 'Power/toughness bonus…', fn: () => ptDialog(c) });
+      if (c.backImg) items.push({ label: 'Transform / flip  (F)', fn: () => act({ type: 'flip', cardId: c.id }) });
+      items.push({ label: c.faceDown ? 'Turn face up' : 'Turn face down', fn: () => act({ type: 'faceDown', cardId: c.id }) });
+      if (c.attachedTo) items.push({ label: 'Unattach', fn: () => act({ type: 'unattach', cardId: c.id }) });
+      else items.push({ label: 'Attach to…', fn: () => startAttach(c) });
+      items.push({ label: c.note ? 'Edit note…' : 'Add note…', fn: () => noteDialog(c) });
       if (!c.hidden) items.push({ label: 'Create a token copy', fn: () => act({ type: 'clone', cardId: c.id }) });
       for (const p of S.players)
         if (p.id !== c.zp) items.push({ label: `Give control to ${p.name}`, fn: () => act({ type: 'move', cardId: c.id, to: 'battlefield', playerId: p.id }) });
-    } else if (c.zone === 'stack') {
-      items.push({ label: 'Resolve (to battlefield or graveyard)', fn: () => resolveStack(c) });
-    } else if (c.backImg && !c.hidden) {
+    } else if (c.backImg && !c.hidden && c.zone !== 'library') {
       items.push({ label: 'Transform / flip', fn: () => act({ type: 'flip', cardId: c.id }) });
     }
+    if (!c.hidden && c.zone !== 'library') items.push({ label: 'Effects…', fn: () => effectsDialog(c) });
     if (c.tokens && c.tokens.length) {
       items.push({ sep: true });
       for (const t of c.tokens.slice(0, 6)) items.push({ label: `Create token: ${t.name}`, fn: () => createRelatedToken(t) });
@@ -933,19 +1605,18 @@
       { header: `Your library (${m ? m.libraryCount : 0})` },
       { label: 'Draw a card  (D)', fn: () => act({ type: 'draw', n: 1 }) },
       { label: 'Draw X…', fn: async () => { const n = await askNumber('Draw how many?', 2); if (n) act({ type: 'draw', n }); } },
-      { label: 'Shuffle', fn: () => act({ type: 'shuffle' }) },
       { label: 'Search library…', fn: () => openViewer(S.you, 'library') },
       { label: 'Look at top X… (scry / surveil)', fn: async () => { const n = await askNumber('Look at how many cards from the top?', 3); if (n) openViewer(S.you, 'library', n); } },
+      { label: 'Shuffle', fn: () => act({ type: 'shuffle' }) },
       { label: 'Mill X…', fn: async () => { const n = await askNumber('Mill how many?', 1); if (n) act({ type: 'mill', n }); } },
       { label: 'Exile top card', fn: () => act({ type: 'exileTop', n: 1 }) },
       { label: 'Exile top card face down', fn: () => act({ type: 'exileTop', n: 1, faceDown: true }) },
       { label: m && m.revealTop ? 'Stop revealing top card' : 'Play with top card revealed', fn: () => act({ type: 'revealTop' }) },
       { sep: true },
       {
-        label: 'Mulligan (shuffle hand in, draw 7)',
+        label: 'Shuffle hand in & draw 7',
         fn: async () => {
-          if (await confirmBox('Mulligan?', 'Shuffle your hand into your library and draw 7. Then put cards on the bottom yourself (right-click → Bottom of library).', 'Mulligan'))
-            act({ type: 'mulligan' });
+          if (await confirmBox('Shuffle hand in and draw 7?', 'Your hand is shuffled into your library and you draw a new 7.', 'Do it')) act({ type: 'mulligan' });
         },
       },
     ];
@@ -954,7 +1625,7 @@
   function zoneBulkMenu(zone) {
     return [
       { header: `Your ${zone}` },
-      { label: 'View', fn: () => openViewer(S.you, zone) },
+      { label: 'View / search', fn: () => openViewer(S.you, zone) },
       { label: 'Shuffle all into library', fn: () => act({ type: 'moveZone', from: zone, to: 'library' }) },
       zone === 'graveyard' ? { label: 'Exile all', fn: () => act({ type: 'moveZone', from: zone, to: 'exile' }) } : null,
       { label: 'Return all to hand', fn: () => act({ type: 'moveZone', from: zone, to: 'hand' }) },
@@ -977,6 +1648,7 @@
       { header: pid === S.you ? 'Your battlefield' : `${p ? p.name : ''}'s battlefield` },
       { label: 'Untap all', fn: () => act({ type: 'untapAll', playerId: pid }) },
       { label: 'Create token…', fn: () => tokenDialog(pid) },
+      pid === S.you ? { label: 'Drop a d20 here', fn: () => act({ type: 'placeDie' }) } : null,
       { label: 'Fit to screen', fn: () => fitView(pid) },
     ];
   }
@@ -994,13 +1666,14 @@
   }
 
   function countersDialog(cardId) {
-    const QUICK = ['+1/+1', '-1/-1', 'loyalty', 'charge', 'shield', 'stun', 'lore', 'time', 'oil', 'finality', 'flying', 'deathtouch'];
+    const QUICK = ['+1/+1', '-1/-1', 'charge', 'loyalty', 'shield', 'stun', 'lore', 'time', 'oil', 'finality', 'flying', 'deathtouch'];
     dialog({
       title: 'Counters',
       body: `<div id="ctr-list"></div>
         <div class="sect-title">Add a counter</div>
         <div class="quick">${QUICK.map((q) => `<button class="btn small" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>
-        <div class="row gap"><input id="ctr-custom" placeholder="Other counter name" maxlength="20" style="flex:1"><button class="btn" id="ctr-add">Add</button></div>`,
+        <div class="row gap"><input id="ctr-custom" placeholder="Other counter name" maxlength="20" style="flex:1" data-noenter="1"><button class="btn" id="ctr-add">Add</button></div>
+        <p class="muted small" style="margin:0">+1/+1 and -1/-1 counters cancel each other out.</p>`,
       buttons: [{ label: 'Done', value: null, primary: true }],
       onMount(root) {
         const draw = () => {
@@ -1010,7 +1683,8 @@
           root.querySelector('#ctr-list').innerHTML = entries.length
             ? `<div class="counter-grid">${entries
                 .map(
-                  ([k, v]) => `<span>${esc(k)}</span><button class="btn tiny" data-k="${esc(k)}" data-d="-1">−</button><b>${v}</b><button class="btn tiny" data-k="${esc(k)}" data-d="1">+</button>`,
+                  ([k, v]) =>
+                    `<span>${esc(counterLabel(k, v))}</span><button class="btn tiny" data-k="${esc(k)}" data-d="-1">−</button><b>${v}</b><button class="btn tiny" data-k="${esc(k)}" data-d="1">+</button>`,
                 )
                 .join('')}</div>`
             : '<p class="muted" style="margin:0">No counters yet.</p>';
@@ -1018,8 +1692,12 @@
         draw();
         const bump = async (name, delta) => {
           await act({ type: 'cardCounter', cardId, name, delta });
-          draw();
+          setTimeout(draw, 60);
         };
+        renderHooks.push(function hook() {
+          if (!document.body.contains(root)) renderHooks.splice(renderHooks.indexOf(hook), 1);
+          else draw();
+        });
         root.addEventListener('click', (e) => {
           const b = e.target.closest('button');
           if (!b) return;
@@ -1034,23 +1712,183 @@
     });
   }
 
+  async function ptDialog(c) {
+    const cur = c.ptMod || { p: 0, t: 0 };
+    const { value, root } = await dialog({
+      title: `Power/toughness bonus: ${c.name}`,
+      body: `<p class="muted small" style="margin:0">For boosts that aren't counters or saved effects (e.g. an equipment you haven't set up, or "+2/+2 until end of turn"). Type 0 and 0 to clear it.</p>
+        <div class="row gap pt-inputs"><label>Power <input type="number" inputmode="numeric" id="pt-p" value="${cur.p}"></label><span class="slash">/</span><label>Toughness <input type="number" inputmode="numeric" id="pt-t" value="${cur.t}"></label></div>`,
+      buttons: [{ label: 'Clear', value: 'clear' }, { label: 'Cancel', value: null }, { label: 'Save', value: 'ok', primary: true }],
+    });
+    if (value === 'clear') return act({ type: 'setPtMod', cardId: c.id, p: 0, t: 0 });
+    if (value !== 'ok') return;
+    act({ type: 'setPtMod', cardId: c.id, p: Number(root.querySelector('#pt-p').value) || 0, t: Number(root.querySelector('#pt-t').value) || 0 });
+  }
+
   async function noteDialog(c) {
-    const t = await askText('Note on card', c.note || '', 'e.g. +2/+2 until end of turn, attacking, enchanted by …', 'Leave empty to remove the note');
+    const t = await askText('Note on card', c.note || '', 'e.g. attacking, monstrous, chosen: Dragons', 'Leave empty to remove the note');
     if (t !== null) act({ type: 'note', cardId: c.id, text: t });
   }
+
+  /* ---------------------------------------------------- effect builder */
+
+  const KIND_LABEL = {
+    pt: 'Creatures get +X/+Y',
+    forEach: 'This gets +X/+Y for each…',
+    etb: 'Creatures enter with extra counters',
+    keyword: 'Creatures have a keyword',
+  };
+
+  function effectFormHTML(e) {
+    const who = (v) => `<select data-f="who">${[
+      ['self', 'This creature'],
+      ['attached', 'Equipped/enchanted creature'],
+      ['yours', 'Creatures you control'],
+      ['yoursOther', 'Other creatures you control'],
+      ['opponents', 'Creatures your opponents control'],
+      ['all', 'All creatures'],
+    ]
+      .map(([k, l]) => `<option value="${k}" ${v === k ? 'selected' : ''}>${l}</option>`)
+      .join('')}</select>`;
+    const filter = `<input data-f="filter" placeholder="Only this type (optional), e.g. Dragon" value="${esc(e.filter || '')}">`;
+    const pt = `<span class="row gap"><input data-f="p" type="number" value="${e.p || 0}" style="width:70px"> / <input data-f="t" type="number" value="${e.t || 0}" style="width:70px"></span>`;
+    let body = `<label class="form">Kind <select data-f="kind">${Object.entries(KIND_LABEL)
+      .map(([k, l]) => `<option value="${k}" ${e.kind === k ? 'selected' : ''}>${l}</option>`)
+      .join('')}</select></label>`;
+    if (e.kind === 'pt') body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label><label class="form">Get +X / +Y ${pt}</label>`;
+    if (e.kind === 'forEach')
+      body += `<label class="form">Gets +X / +Y ${pt}</label>
+        <label class="form">for each <input data-f="count" value="${esc(e.count || 'artifact')}" placeholder="artifact, creature, land, Elf…"></label>
+        <label class="form">… <select data-f="where">${[
+          ['you', 'you control'],
+          ['opp', 'your opponents control'],
+          ['all', 'on the battlefield'],
+          ['yourGraveyard', 'in your graveyard'],
+        ]
+          .map(([k, l]) => `<option value="${k}" ${e.where === k ? 'selected' : ''}>${l}</option>`)
+          .join('')}</select></label>
+        <label class="row gap"><input type="checkbox" data-f="other" ${e.other ? 'checked' : ''}> don't count this card itself ("each other…")</label>`;
+    if (e.kind === 'etb')
+      body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label>
+        <label class="form">Enter with <span class="row gap"><input data-f="n" type="number" min="1" value="${e.n || 1}" style="width:70px"> extra <input data-f="counter" value="${esc(e.counter || '+1/+1')}" style="width:110px"> counter(s)</span></label>`;
+    if (e.kind === 'keyword')
+      body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label><label class="form">Have <input data-f="keyword" value="${esc(e.keyword || '')}" placeholder="Flying, Trample, Haste…"></label>`;
+    return body;
+  }
+
+  function readEffectForm(root, kind) {
+    const v = (f) => {
+      const el = root.querySelector(`[data-f="${f}"]`);
+      if (!el) return undefined;
+      return el.type === 'checkbox' ? el.checked : el.value;
+    };
+    return E.cleanEffects([{ kind, who: v('who'), filter: v('filter'), p: v('p'), t: v('t'), count: v('count'), where: v('where'), other: v('other'), n: v('n'), counter: v('counter'), keyword: v('keyword') }])[0];
+  }
+
+  /** Build / edit one effect. Resolves with the effect or null. */
+  async function editEffect(initial) {
+    let eff = { kind: 'pt', who: 'self', p: 1, t: 1, ...(initial || {}) };
+    const { value, root } = await dialog({
+      title: initial ? 'Edit effect' : 'Add effect',
+      body: '<div id="ef-form" class="ef-form"></div><div class="ef-preview muted"></div>',
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Save effect', value: 'ok', primary: true }],
+      onMount(r) {
+        const form = r.querySelector('#ef-form');
+        const draw = () => {
+          form.innerHTML = effectFormHTML(eff);
+          preview();
+        };
+        const preview = () => {
+          const e = readEffectForm(form, eff.kind);
+          r.querySelector('.ef-preview').textContent = e ? `“${E.describeEffect(e)}”` : '';
+        };
+        form.addEventListener('change', (ev) => {
+          if (ev.target.dataset.f === 'kind') {
+            eff = { ...readEffectForm(form, eff.kind), kind: ev.target.value };
+            draw();
+          } else preview();
+        });
+        form.addEventListener('input', preview);
+        draw();
+      },
+    });
+    if (value !== 'ok') return null;
+    const kind = root.querySelector('[data-f="kind"]').value;
+    const out = readEffectForm(root.querySelector('#ef-form'), kind);
+    if (out && initial) {
+      out.on = initial.on !== false;
+      if (initial.note) out.note = initial.note;
+    }
+    return out;
+  }
+
+  function effectsDialog(c) {
+    let list = JSON.parse(JSON.stringify(c.effects || []));
+    dialog({
+      title: `Effects: ${c.name}`,
+      wide: true,
+      body: `<p class="muted small" style="margin:0">Effects you set here are saved with your deck and apply to every copy of ${esc(c.name)}. They only work while the card is on the battlefield.</p>
+        <div id="ef-list" class="ef-list"></div>
+        <div class="row gap"><button class="btn" id="ef-add">+ Add effect</button>${c.oracle ? '<button class="btn ghost" id="ef-suggest">Suggest from card text</button>' : ''}</div>
+        ${c.oracle ? `<details><summary class="muted small">Card text</summary><p class="small oracle">${esc(c.oracle)}${c.backOracle ? `<br><br>${esc(c.backOracle)}` : ''}</p></details>` : ''}`,
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Save', value: 'ok', primary: true }],
+      onMount(root) {
+        const draw = () => {
+          root.querySelector('#ef-list').innerHTML = list.length
+            ? list
+                .map(
+                  (e, i) => `<div class="ef-row ${e.on ? '' : 'off'}">
+                    <label class="switch" title="On/off"><input type="checkbox" data-on="${i}" ${e.on ? 'checked' : ''}><span></span></label>
+                    <span class="ef-text">${esc(E.describeEffect(e))}${e.note ? `<br><span class="muted small">${esc(e.note)}</span>` : ''}</span>
+                    <button class="btn tiny" data-edit="${i}">Edit</button><button class="btn tiny" data-del="${i}">Remove</button></div>`,
+                )
+                .join('')
+            : '<p class="muted" style="margin:0">No effects yet.</p>';
+        };
+        draw();
+        root.addEventListener('change', (e) => {
+          if (e.target.dataset.on) {
+            list[Number(e.target.dataset.on)].on = e.target.checked;
+            draw();
+          }
+        });
+        root.addEventListener('click', async (e) => {
+          const b = e.target.closest('button');
+          if (!b) return;
+          if (b.id === 'ef-add') {
+            const eff = await editEffect(null);
+            if (eff) list.push(eff);
+          } else if (b.id === 'ef-suggest') {
+            const sug = I.suggestEffects(c).suggestions;
+            if (!sug.length) toast("I couldn't find anything I recognise in this card's text. Use + Add effect instead.");
+            for (const s of sug) if (!list.some((x) => JSON.stringify({ ...x, on: true, note: undefined }) === JSON.stringify({ ...s.effect, on: true, note: undefined }))) list.push(s.effect);
+          } else if (b.dataset.edit) {
+            const i = Number(b.dataset.edit);
+            const eff = await editEffect(list[i]);
+            if (eff) list[i] = eff;
+          } else if (b.dataset.del) list.splice(Number(b.dataset.del), 1);
+          draw();
+        });
+      },
+    }).then(({ value }) => {
+      if (value === 'ok') act({ type: 'setEffects', cardId: c.id, effects: list });
+    });
+  }
+
+  /* ------------------------------------------------------- tokens etc. */
 
   function tokenDialog(pid = S.you) {
     dialog({
       title: 'Create a token',
       wide: true,
-      body: `<div class="row gap"><input id="tk-q" placeholder="Search Scryfall tokens, e.g. Treasure, Zombie, Soldier" style="flex:1"><button class="btn primary" id="tk-go">Search</button>
+      body: `<div class="row gap"><input id="tk-q" placeholder="Search Scryfall tokens, e.g. Treasure, Zombie, Soldier" style="flex:1" data-noenter="1"><button class="btn primary" id="tk-go">Search</button>
           <label class="row gap small muted">How many <input id="tk-n" type="number" value="1" min="1" max="30" style="width:64px"></label></div>
         <div class="quick">${['Treasure', 'Clue', 'Food', 'Soldier', 'Zombie', 'Goblin', 'Spirit', 'Beast', 'Saproling', 'Blood', 'Map']
           .map((q) => `<button class="btn small" data-q="${q}">${q}</button>`)
           .join('')}</div>
         <div id="tk-res" class="token-results"></div>
         <div class="sect-title">…or make your own</div>
-        <div class="row gap"><input id="tk-name" placeholder="Name, e.g. Elemental" style="flex:1"><input id="tk-pt" placeholder="P/T e.g. 3/3" style="width:110px"><button class="btn" id="tk-custom">Create</button></div>`,
+        <div class="row gap"><input id="tk-name" placeholder="Name, e.g. Elemental" style="flex:1" data-noenter="1"><input id="tk-pt" placeholder="P/T e.g. 3/3" style="width:110px" data-noenter="1"><button class="btn" id="tk-custom">Create</button></div>`,
       buttons: [{ label: 'Close', value: null }],
       onMount(root, close) {
         let results = [];
@@ -1070,7 +1908,6 @@
         root.querySelector('#tk-q').addEventListener('keydown', (e) => {
           if (e.key === 'Enter') {
             e.preventDefault();
-            e.stopPropagation();
             search(e.target.value);
           }
         });
@@ -1096,28 +1933,52 @@
     });
   }
 
+  /* ---------------------------------------------------------- deck dialog */
+
   function savedDecks() {
     return Store.get(DECKS_KEY) || [];
+  }
+  function saveDecks(list) {
+    Store.set(DECKS_KEY, list.slice(0, 20));
   }
   function rememberDeck(deck) {
     const list = savedDecks().filter((d) => d.name !== deck.name);
     list.unshift({ name: deck.name, cards: deck.cards, savedAt: Date.now() });
-    Store.set(DECKS_KEY, list.slice(0, 12));
+    saveDecks(list);
+  }
+  /** Keep the saved copy of a deck in sync when effects are edited mid-game. */
+  function updateSavedDeckEffects(cardName, effects) {
+    const mine = me();
+    const list = savedDecks();
+    let changed = false;
+    for (const d of list) {
+      if (mine && mine.deckName && d.name !== mine.deckName) continue;
+      for (const c of d.cards) if (c.name === cardName) {
+        c.effects = effects;
+        changed = true;
+      }
+    }
+    if (changed) saveDecks(list);
+  }
+  /** Effects you already set up for a card in any of your saved decks. */
+  function knownEffects(cardName) {
+    for (const d of savedDecks()) for (const c of d.cards) if (c.name === cardName && c.effects && c.effects.length) return { effects: c.effects, deck: d.name };
+    return null;
   }
 
   function deckDialog() {
-    const saved = savedDecks();
     dialog({
       title: 'Load a deck',
       wide: true,
-      body: `<p class="muted small" style="margin:0">On Archidekt open your deck → <b>Export</b> → choose the text format that includes set codes
-          (lines look like <code>1x Sol Ring (c21) 263</code>) → copy, and paste it below. The set code + number gives you the exact art you picked.
-          Lists from Moxfield, MTG Arena or plain <code>1 Sol Ring</code> lines work too. Put commanders under a <code>Commander</code> heading,
-          or keep Archidekt's <code>[Commander]</code> tag.</p>
+      body: `<div id="dk-saved"></div>
+        <div class="sect-title">Import a new deck</div>
+        <p class="muted small" style="margin:0">On Archidekt open your deck → <b>Export</b> → choose the text format that includes set codes
+          (lines look like <code>1x Sol Ring (c21) 263</code>) → copy, and paste it below. Lists from Moxfield, MTG Arena or plain <code>1 Sol Ring</code> lines work too.
+          Put commanders under a <code>Commander</code> heading, or keep Archidekt's <code>[Commander]</code> tag.</p>
         <label class="form">Deck name <input id="dk-name" placeholder="My deck" maxlength="80"></label>
-        <textarea id="dk-text" placeholder="Commander\n1x Atraxa, Praetors' Voice (2x2) 190\n\nDeck\n1x Sol Ring (c21) 263\n1x Command Tower (c21) 284\n..."></textarea>
+        <textarea id="dk-text" placeholder="Commander\n1x Atraxa, Praetors' Voice (2x2) 190\n\nDeck\n1x Sol Ring (c21) 263\n..."></textarea>
         <div id="dk-msg"></div>
-        ${saved.length ? `<div class="sect-title">Decks you imported before</div><div class="quick">${saved.map((d, i) => `<button class="btn small" data-saved="${i}">${esc(d.name)}</button>`).join('')}</div>` : ''}`,
+        <div id="dk-report"></div>`,
       buttons: [{ label: 'Cancel', value: null }],
       onMount(root, close) {
         const mf = root.querySelector('.mf');
@@ -1127,20 +1988,87 @@
         mf.appendChild(go);
         const msg = root.querySelector('#dk-msg');
         let imported = null;
+        let report = [];
+
+        const drawSaved = () => {
+          const saved = savedDecks();
+          root.querySelector('#dk-saved').innerHTML = saved.length
+            ? `<div class="sect-title">Decks you imported before</div><div class="saved-decks">${saved
+                .map(
+                  (d, i) => `<div class="saved-deck"><span class="nm">${esc(d.name)}</span><span class="muted small">${d.cards.reduce((s, c) => s + (c.qty || 1), 0)} cards</span>
+                    <button class="btn small primary" data-use="${i}">Use</button><button class="btn small" data-rename="${i}">Rename</button><button class="btn small" data-remove="${i}">Remove</button></div>`,
+                )
+                .join('')}</div>`
+            : '';
+        };
+        drawSaved();
+
         const load = async (deck) => {
           const r = await act({ type: 'loadDeck', deck });
           if (!r.error) {
-            toast(`Loaded "${deck.name}". Click "Start / restart game" when everyone is ready.`);
+            toast(`Loaded "${deck.name}". Click "Start game" when everyone is ready.`);
             close(null);
           }
         };
-        root.addEventListener('click', (e) => {
-          const b = e.target.closest('button[data-saved]');
-          if (b) load(saved[Number(b.dataset.saved)]);
+
+        root.addEventListener('click', async (e) => {
+          const b = e.target.closest('button');
+          if (!b) return;
+          const saved = savedDecks();
+          if (b.dataset.use) load(saved[Number(b.dataset.use)]);
+          if (b.dataset.rename) {
+            const d = saved[Number(b.dataset.rename)];
+            const n = await askText('Rename deck', d.name, '', 'New name');
+            if (n && n !== d.name) {
+              d.name = n;
+              saveDecks(saved);
+              drawSaved();
+            }
+          }
+          if (b.dataset.remove) {
+            const d = saved[Number(b.dataset.remove)];
+            if (await confirmBox('Remove deck?', `Remove "${esc(d.name)}" from your saved decks? (Games already using it aren't affected.)`, 'Remove', true)) {
+              saved.splice(Number(b.dataset.remove), 1);
+              saveDecks(saved);
+              drawSaved();
+            }
+          }
+          if (b.dataset.editsug) {
+            const i = Number(b.dataset.editsug);
+            const eff = await editEffect(report[i].effect);
+            if (eff) {
+              report[i].effect = eff;
+              report[i].text = E.describeEffect(eff);
+              report[i].checked = true;
+              drawReport();
+            }
+          }
         });
+        root.addEventListener('change', (e) => {
+          if (e.target.dataset.sug) report[Number(e.target.dataset.sug)].checked = e.target.checked;
+        });
+
+        const drawReport = () => {
+          const box = root.querySelector('#dk-report');
+          if (!report.length) return (box.innerHTML = '');
+          box.innerHTML = `<div class="sect-title">Automation report: effects I can set up for you</div>
+            <p class="muted small" style="margin:0">Tick the ones that are right. You can change any of them later (right-click a card → Effects…).</p>
+            <div class="report">${report
+              .map((r, i) =>
+                r.warn
+                  ? `<div class="rep warn">⚠ <b>${esc(r.card)}</b>: ${esc(r.warn)}</div>`
+                  : `<label class="rep"><input type="checkbox" data-sug="${i}" ${r.checked ? 'checked' : ''}> <b>${esc(r.card)}</b>: ${esc(r.text)}${
+                      r.conditional ? ' <span class="muted">(conditional, switch it on/off in game)</span>' : ''
+                    }${r.from ? ` <span class="muted">(from your deck "${esc(r.from)}")</span>` : ''} <button class="btn tiny" data-editsug="${i}">Edit</button></label>`,
+              )
+              .join('')}</div>`;
+        };
+
         go.addEventListener('click', async () => {
           if (imported) {
             imported.name = root.querySelector('#dk-name').value.trim() || imported.name;
+            for (const c of imported.cards) c.effects = [];
+            for (const r of report) if (!r.warn && r.checked) imported.cards[r.idx].effects.push(r.effect);
             rememberDeck(imported);
             return load(imported);
           }
@@ -1156,6 +2084,19 @@
             if (S.format === 'commander' && !res.commanders.length) lines.push('No commander detected. You can still play; move your commander to the command zone with right-click.');
             msg.className = res.missing.length || res.warning ? 'err' : 'ok';
             msg.textContent = lines.join('\n');
+            // automation report
+            report = [];
+            res.cards.forEach((c, idx) => {
+              const known = knownEffects(c.name);
+              if (known) {
+                for (const e of known.effects) report.push({ idx, card: c.name, effect: e, text: E.describeEffect(e), checked: true, from: known.deck });
+                return;
+              }
+              const sug = I.suggestEffects(c);
+              for (const s of sug.suggestions) report.push({ idx, card: c.name, effect: s.effect, text: s.text, conditional: s.conditional, checked: true });
+              if (sug.unhandled) report.push({ idx, card: c.name, warn: "has power/toughness text I can't set up automatically. Use Effects… or the P/T bonus in game." });
+            });
+            drawReport();
             go.textContent = 'Use this deck';
           } catch (err) {
             msg.className = 'err';
@@ -1165,37 +2106,38 @@
         });
         root.querySelector('#dk-text').addEventListener('input', () => {
           imported = null;
+          report = [];
+          drawReport();
           go.textContent = 'Import';
         });
       },
     });
   }
 
-  function diceDialog() {
-    dialog({
-      title: 'Dice & coins',
-      body: `<div class="quick">${[4, 6, 8, 10, 12, 20, 100].map((n) => `<button class="btn" data-d="${n}">d${n}</button>`).join('')}
-        <button class="btn" data-coin="1">Flip a coin</button></div><p class="muted small" style="margin:0">Results appear in the log for everyone.</p>`,
-      buttons: [{ label: 'Close', value: null }],
-      onMount(root) {
-        root.addEventListener('click', (e) => {
-          const b = e.target.closest('button');
-          if (!b) return;
-          if (b.dataset.d) act({ type: 'roll', sides: Number(b.dataset.d) });
-          if (b.dataset.coin) act({ type: 'coin' });
-        });
-      },
-    });
-  }
+  /* ------------------------------------------------------------ settings */
+
+  const FELTS = ['#1a2a24', '#1d2a3a', '#2b1f33', '#3a1f1f', '#3b3220', '#1f3333', '#2a2a2a', '#0f3d24'];
 
   function settingsDialog() {
     const st = S.settings;
     const host = session && session.isHost;
+    const mine = me();
+    const pref = Store.get(LAYOUT_KEY) || 'auto';
     dialog({
-      title: 'Game settings',
-      body: `<label class="row gap"><input type="checkbox" id="st-untap" ${st.autoUntap ? 'checked' : ''}> Untap automatically when a turn passes</label>
+      title: 'Settings',
+      body: `<div class="sect-title">Your battlefield colour</div>
+        <div class="felts">${FELTS.map((c) => `<button class="felt ${mine && mine.bfColor === c ? 'on' : ''}" data-felt="${c}" style="background:${c}" title="${c}"></button>`).join('')}
+          <label class="felt custom" title="Pick any colour"><input type="color" id="st-felt" value="${(mine && mine.bfColor) || '#1a2a24'}"></label>
+          <button class="btn small" data-felt="">Default</button></div>
+        <div class="sect-title">Game</div>
+        <label class="row gap"><input type="checkbox" id="st-untap" ${st.autoUntap ? 'checked' : ''}> Untap automatically when a turn passes</label>
         <label class="row gap"><input type="checkbox" id="st-draw" ${st.autoDraw ? 'checked' : ''}> Draw automatically when a turn passes</label>
-        <label class="row gap">Starting life <input type="number" id="st-life" value="${st.startingLife}" style="width:80px"> <span class="muted small">(used on Start / restart)</span></label>
+        <label class="row gap">Starting life <input type="number" id="st-life" value="${st.startingLife}" style="width:80px"></label>
+        <div class="sect-title">This device</div>
+        <label class="row gap">Layout <select id="st-layout">
+          <option value="auto" ${pref === 'auto' ? 'selected' : ''}>Automatic (phone layout on touch screens)</option>
+          <option value="phone" ${pref === 'phone' ? 'selected' : ''}>Phone / touch layout</option>
+          <option value="desktop" ${pref === 'desktop' ? 'selected' : ''}>Computer layout</option></select></label>
         ${host
           ? `<div class="sect-title">Players</div>${S.players
               .filter((p) => p.id !== S.you)
@@ -1208,6 +2150,10 @@
         root.addEventListener('click', async (e) => {
           const b = e.target.closest('button');
           if (!b) return;
+          if (b.dataset.felt !== undefined) {
+            act({ type: 'setColor', color: b.dataset.felt });
+            for (const x of $$('.felt', root)) x.classList.toggle('on', x === b);
+          }
           if (b.dataset.remove) {
             const p = playerById(b.dataset.remove);
             if (await confirmBox('Remove player?', `Remove ${esc(p.name)} and all their cards from the game?`, 'Remove', true)) {
@@ -1217,50 +2163,78 @@
           }
           if (b.id === 'st-backup') downloadJSON(session.game, `mtg-game-${S.id}-${new Date().toISOString().slice(0, 10)}.json`);
         });
+        root.querySelector('#st-felt').addEventListener('change', (e) => act({ type: 'setColor', color: e.target.value }));
       },
     }).then(async ({ value, root }) => {
       if (value !== 'ok') return;
       const u = root.querySelector('#st-untap').checked;
       const d = root.querySelector('#st-draw').checked;
       const l = Number.parseInt(root.querySelector('#st-life').value, 10);
+      const layout = root.querySelector('#st-layout').value;
       if (u !== st.autoUntap) await act({ type: 'setting', key: 'autoUntap', value: u });
       if (d !== st.autoDraw) await act({ type: 'setting', key: 'autoDraw', value: d });
       if (Number.isFinite(l) && l !== st.startingLife) await act({ type: 'setting', key: 'startingLife', value: l });
+      if (layout !== pref) {
+        Store.set(LAYOUT_KEY, layout);
+        location.reload();
+      }
     });
   }
 
   function helpDialog() {
+    const phone = U.phone;
     dialog({
       title: 'How to play',
       wide: true,
-      body: `<div class="help-grid">
-        <b>Move cards</b><span>Drag them anywhere: battlefield, hand, the stack, your piles, or another player's battlefield (gives them control).</span>
+      body: phone
+        ? `<div class="help-grid">
+        <b>Your hand</b><span>Tap a card to see it. Drag it up to play it (lands go to the battlefield, everything else to the stack). Hold, then slide sideways to re-order.</span>
+        <b>Battlefield</b><span>Drag to look around, pinch to zoom. Tap a land to tap it. Tap anything else for its options. Hold a card, then drag to move it. Hold and let go for the menu.</span>
+        <b>Stack</b><span>Tap a spell on the stack for Resolves / Doesn't resolve.</span>
+        <b>Menu ☰</b><span>Zones (library, graveyard, exile, command), opponents' battlefields, log, zoom, d20, tokens, proliferate, undo and settings.</span>
+        <b>Phases</b><span>Tap the phases along the top as you go. Pass turn is at the end.</span>
+      </div>`
+        : `<div class="help-grid">
+        <b>Move cards</b><span>Drag them anywhere: battlefield, hand (drop between cards to sort), the stack, your piles, or another player's battlefield.</span>
         <b>Tap / untap</b><span>Click a card on the battlefield, or hover it and press <kbd>T</kbd> / <kbd>Space</kbd>.</span>
-        <b>Card details</b><span>Hover a card for a big image. Right-click it for every option, including <i>Open on Scryfall</i> for rulings.</span>
-        <b>Play from hand</b><span>Double-click a card in your hand, or drag it out. Drag it to the Stack to cast it so your friend can respond.</span>
-        <b>Resolve the stack</b><span>Double-click a card on the stack (permanents go to the battlefield, everything else to the graveyard).</span>
-        <b>Library</b><span>Click to draw (<kbd>D</kbd>). Right-click it to shuffle, search, scry/look at top X, mill, mulligan…</span>
-        <b>Graveyard / exile</b><span>Click to see all cards. Drag cards out of that window.</span>
-        <b>Battlefield view</b><span>Mouse wheel zooms, drag an empty spot to scroll around, "fit" resets.</span>
-        <b>Counters &amp; notes</b><span>Right-click a permanent → Counters… or Add note. Player counters (poison etc.) are in the side panel.</span>
-        <b>Life</b><span>± buttons (hold <kbd>Shift</kbd> for 5). Click the number to type a value.</span>
-        <b>Turns</b><span>"Pass turn" moves to the next player, untaps their permanents and draws for them (change in Settings). Click a phase to show where you are.</span>
-        <b>Other keys</b><span><kbd>F</kbd> transform hovered card · <kbd>U</kbd> untap all your permanents · <kbd>Enter</kbd> chat · <kbd>Esc</kbd> close windows</span>
-      </div>
-      <p class="muted small" style="margin:0">Rules aren't enforced. You're in charge, just like at a real table.</p>`,
+        <b>Card details</b><span>Hover a card for a big image plus its total power/toughness, counters and effects. Right-click for every option, including <i>Open on Scryfall</i>.</span>
+        <b>Play from hand</b><span>Double-click a card in your hand, or drag it out. Drag it to the Stack to cast it so others can respond.</span>
+        <b>Stack</b><span>Double-click to resolve. Right-click for Resolves / Doesn't resolve.</span>
+        <b>Equipment &amp; auras</b><span>Drag one onto a creature to attach it (or right-click → Attach to…).</span>
+        <b>Effects</b><span>Right-click → Effects… to set up what a card does (anthems, "for each" bonuses, extra counters, keywords). Totals update automatically.</span>
+        <b>Library</b><span>Click to draw (<kbd>D</kbd>). Right-click to search (type to filter), scry, mill, shuffle…</span>
+        <b>Opponents' stuff</b><span>Changing anything on another player's battlefield, hand, library or life asks them first.</span>
+        <b>Battlefields</b><span>Wheel zooms, drag an empty spot to scroll. "All battlefields" shows everyone in turn order.</span>
+        <b>d20</b><span>Click d20 to drop a die on your battlefield, then flick it (quick drag &amp; release). Click a rolled die to remove it.</span>
+        <b>Other keys</b><span><kbd>F</kbd> transform · <kbd>U</kbd> untap all · <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo · <kbd>Enter</kbd> chat · <kbd>Esc</kbd> close</span>
+      </div>`,
     });
   }
 
   /* ============================================================= viewer */
 
   async function openViewer(pid, zone, count) {
-    viewer = { pid, zone, count: count || null, map: null };
+    viewer = { pid, zone, count: count || null, map: null, q: '' };
     $('#viewer').hidden = false;
+    $('#viewer').dataset.built = '';
     if (zone === 'library' || (zone === 'hand' && pid !== S.you)) {
       const r = await act({ type: 'viewZone', playerId: pid, zone, count: count || undefined });
+      if (r.pending) {
+        toast(`Waiting for ${r.pending.waitingFor} to let you look…`);
+        return closeViewer();
+      }
       if (r.error || !r.private) return closeViewer();
       setPrivate(r.private.cards);
     }
+    renderViewer();
+  }
+
+  /** A private result arriving later (after the other player approved). */
+  function openViewerPrivate(priv) {
+    viewer = { pid: priv.playerId, zone: priv.zone, count: priv.cards.length || null, map: null, q: '', foreign: priv.playerId !== S.you };
+    setPrivate(priv.cards);
+    $('#viewer').hidden = false;
+    $('#viewer').dataset.built = '';
     renderViewer();
   }
 
@@ -1271,7 +2245,7 @@
   }
 
   async function refreshPrivateViewer() {
-    if (!viewer || !viewer.map || viewer.refreshing) return;
+    if (!viewer || !viewer.map || viewer.refreshing || viewer.pid !== S.you) return;
     viewer.refreshing = true;
     const r = await session.act({ type: 'viewZone', playerId: viewer.pid, zone: viewer.zone, count: viewer.count || undefined, silent: true });
     if (viewer) {
@@ -1291,7 +2265,7 @@
 
   let lastViewerVersion = -1;
   function renderViewer() {
-    if (!viewer) return;
+    if (!viewer || !S) return;
     const p = playerById(viewer.pid);
     if (!p) return closeViewer();
     const v = $('#viewer');
@@ -1302,14 +2276,19 @@
     let foot = '';
     if (viewer.zone === 'library' && mine) {
       foot = viewer.count
-        ? '<span class="muted small" style="flex:1">Top of library is first. Drag cards where they go, or right-click → Top/Bottom of library.</span><button class="btn" data-v="close">Done</button>'
+        ? '<span class="muted small" style="flex:1">Top of library is first. Move cards where they go, or use Top/Bottom of library.</span><button class="btn" data-v="close">Done</button>'
         : '<button class="btn primary" data-v="shuffle">Shuffle &amp; close</button><button class="btn" data-v="close">Close without shuffling</button>';
     } else if (viewer.zone === 'library') foot = '<button class="btn" data-v="close">Done</button>';
     if (!v.dataset.built || v.dataset.title !== title) {
-      v.innerHTML = `<div class="vh"><b></b><span class="muted small">double-click → hand · drag anywhere</span><button class="btn small ghost" data-v="close">✕</button></div>
+      v.innerHTML = `<div class="vh"><b></b><input class="vsearch" placeholder="Search name, type or rules text…" value="${esc(viewer.q)}">
+        <button class="btn small ghost" data-v="close">✕</button></div>
         <div class="vb"></div>${foot ? `<div class="vf">${foot}</div>` : ''}`;
       v.dataset.built = '1';
       v.dataset.title = title;
+      v.querySelector('.vsearch').addEventListener('input', (e) => {
+        viewer.q = e.target.value;
+        drawViewerCards();
+      });
     }
     v.querySelector('.vh b').textContent = title;
     if (viewer.map && S.version !== lastViewerVersion) {
@@ -1319,17 +2298,57 @@
     drawViewerCards();
   }
 
+  /**
+   * Search: first the cards whose NAME matches, then (after a gap) the cards whose
+   * type line or rules text matches. Each group is alphabetical.
+   */
+  function searchGroups(cards, q) {
+    q = q.trim().toLowerCase();
+    if (!q) return null;
+    const name = [];
+    const other = [];
+    for (const c of cards) {
+      if (!c || c.hidden) continue;
+      const n = `${c.name} ${c.backName || ''}`.toLowerCase();
+      const t = `${c.typeLine || ''} ${c.backTypeLine || ''} ${c.oracle || ''} ${c.backOracle || ''}`.toLowerCase();
+      if (n.includes(q)) name.push(c);
+      else if (t.includes(q)) other.push(c);
+    }
+    const byName = (a, b) => a.name.localeCompare(b.name);
+    return { name: name.sort(byName), other: other.sort(byName) };
+  }
+
+  function viewerCards() {
+    if (!viewer) return [];
+    if (viewer.map) return viewer.cards;
+    const p = playerById(viewer.pid);
+    const z = (p.zones[viewer.zone] || []).slice();
+    return (viewer.zone === 'hand' ? z : z.reverse()).map((id) => S.cards[id]).filter(Boolean);
+  }
+
   function drawViewerCards() {
     if (!viewer) return;
-    const p = playerById(viewer.pid);
-    let ids;
-    if (viewer.map) ids = viewer.cards.map((c) => c.id);
-    else {
-      const z = (p.zones[viewer.zone] || []).slice();
-      ids = viewer.zone === 'hand' ? z : z.reverse(); // newest first for graveyard / exile
-    }
     const body = $('#viewer .vb');
-    reconcile(body, ids, (id, el) => cardEl(getCard(id), el, 'viewer'));
+    const cards = viewerCards();
+    const groups = searchGroups(cards, viewer.q || '');
+    let ids;
+    if (groups) {
+      ids = groups.name.map((c) => c.id);
+      if (groups.name.length && groups.other.length) ids.push('gap:1');
+      ids = ids.concat(groups.other.map((c) => c.id));
+      if (!ids.length) ids = ['gap:none'];
+    } else ids = cards.map((c) => c.id);
+    reconcile(body, ids, (id, el) => {
+      if (id.startsWith('gap:')) {
+        if (!el || !el.classList.contains('vgap')) {
+          el = document.createElement('div');
+          el.className = 'vgap';
+        }
+        el.textContent = id === 'gap:none' ? 'Nothing matches.' : 'Type line / rules text matches';
+        return el;
+      }
+      return cardEl(getCard(id), el && el.classList.contains('card') ? el : null, 'viewer');
+    });
   }
 
   $('#viewer').addEventListener('click', (e) => {
@@ -1339,6 +2358,20 @@
   });
 
   /* ======================================================= global clicks */
+
+  document.addEventListener(
+    'click',
+    (e) => {
+      if (!S || !mode) return;
+      if (e.target.closest('#banners, #menu, .modal')) return;
+      if (U.phone && e.target.closest('.pbf .card')) return; // phone battlefield handles its own taps
+      if (modeClick(e.target)) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    },
+    true,
+  );
 
   document.addEventListener('click', async (e) => {
     const t = e.target.closest('[data-act]');
@@ -1365,16 +2398,23 @@
       case 'cmd':
         act({ type: 'cmdDamage', playerId: pid, sourceId: t.dataset.src, delta: Number(t.dataset.d) * (e.shiftKey ? 5 : 1) });
         break;
+      case 'switch-opp': {
+        const seats = seatOrder().filter((id) => id !== S.you);
+        selectedOpp = seats[(seats.indexOf(selectedOpp) + 1) % seats.length];
+        render();
+        break;
+      }
       case 'zone': {
         const p = playerById(pid);
         const zone = t.dataset.zone;
-        if (zone === 'hand' && !p.handRevealed) return toast(`${p.name}'s hand is hidden.`);
+        if (zone === 'hand' && !p.handRevealed && pid !== S.you) return toast(`${p.name}'s hand is hidden.`);
         if (zone === 'library') {
+          if (pid === S.you) return showMenu(libraryMenu(), e.clientX, e.clientY);
           return showMenu(
             [
               { header: `${p.name}'s library (${p.libraryCount})` },
-              { label: 'Look at the top X cards…', fn: async () => { const n = await askNumber('How many?', 1); if (n) openViewer(pid, 'library', n); } },
-              { label: 'Search it (everyone sees this in the log)', fn: () => openViewer(pid, 'library') },
+              { label: 'Look at the top X cards… (asks them)', fn: async () => { const n = await askNumber('How many?', 1); if (n) openViewer(pid, 'library', n); } },
+              { label: 'Search it (asks them)', fn: () => openViewer(pid, 'library') },
             ],
             e.clientX,
             e.clientY,
@@ -1402,30 +2442,48 @@
 
   /* ============================================================ topbar */
 
-  $('#btn-leave').addEventListener('click', async () => {
+  async function leaveGame() {
     if (session && session.isHost) {
       if (!(await confirmBox('Leave the game?', 'The game is saved in this browser. Your friends will be disconnected until you open it again from the lobby.', 'Leave'))) return;
       session.destroy();
     }
     location.href = location.pathname;
-  });
-  $('#btn-code').addEventListener('click', async () => {
+  }
+
+  async function copyInvite() {
     const code = S ? S.id : '';
     const link = location.protocol.startsWith('http') ? `${location.origin}${location.pathname}?join=${code}` : null;
     try {
       await navigator.clipboard.writeText(link || code);
-      toast(link ? 'Invite link copied. Send it to your friend!' : `Game code ${code} copied. Your friend enters it under "Join a friend's game".`);
+      toast(link ? 'Invite link copied. Send it to your friends!' : `Game code ${code} copied. Friends enter it under "Join a friend's game".`);
     } catch {
       toast(`Game code: ${code}${link ? `  ·  link: ${link}` : ''}`);
     }
-  });
-  $('#btn-deck').addEventListener('click', deckDialog);
-  $('#btn-start').addEventListener('click', async () => {
-    if (await confirmBox('Start a new game?', "Everyone's deck is rebuilt and shuffled, life is reset, and everyone draws 7. A random player goes first.", 'Start'))
+  }
+
+  async function startGameClick() {
+    if (await confirmBox('Start a new game?', "Everyone's deck is rebuilt and shuffled, life is reset, and everyone draws 7. Then everyone mulligans or keeps, and you roll a d20 for turn order.", 'Start'))
       act({ type: 'startGame' });
-  });
+  }
+
+  function toggleBoardView() {
+    boardView = boardView === 'grid' ? 'focus' : 'grid';
+    Store.set(VIEW_KEY, boardView);
+    for (const pid of Object.keys(views)) views[pid].auto = true;
+    render();
+    requestAnimationFrame(() => {
+      for (const p of S.players) fitView(p.id);
+    });
+  }
+
+  $('#btn-leave').addEventListener('click', leaveGame);
+  $('#btn-code').addEventListener('click', copyInvite);
+  $('#btn-deck').addEventListener('click', deckDialog);
+  $('#btn-start').addEventListener('click', startGameClick);
   $('#btn-settings').addEventListener('click', settingsDialog);
   $('#btn-help').addEventListener('click', helpDialog);
+  $('#btn-undo').addEventListener('click', () => act({ type: 'undo' }));
+  $('#btn-grid').addEventListener('click', toggleBoardView);
   $('#btn-log').addEventListener('click', () => {
     const g = $('#game');
     g.classList.toggle('no-log');
@@ -1437,24 +2495,33 @@
   });
   $('#btn-pass').addEventListener('click', () => act({ type: 'passTurn' }));
   $('#btn-token').addEventListener('click', () => tokenDialog(S.you));
-  $('#btn-dice').addEventListener('click', diceDialog);
+  $('#btn-d20').addEventListener('click', () => act({ type: 'placeDie' }));
+  $('#btn-prolif').addEventListener('click', startProliferate);
   $('#chat-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const i = $('#chat-input');
     if (i.value.trim()) act({ type: 'chat', text: i.value });
     i.value = '';
   });
+  $('#status').classList.add('status-pill');
 
   /* ============================================================ keyboard */
 
   document.addEventListener('keydown', (e) => {
-    if ($('#game').hidden || !S) return;
+    if (U.phone || $('#game').hidden || !S) return;
     if (e.key === 'Escape') {
       hideMenu();
-      if (viewer) closeViewer();
+      if (mode) cancelMode();
+      else if (viewer) closeViewer();
       return;
     }
-    if (e.target.closest('input, textarea, select') || $('#modal-root').children.length || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target.closest('input, textarea, select') || $('#modal-root').children.length || e.altKey) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      act({ type: 'undo' });
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) return;
     const k = e.key.toLowerCase();
     const c = hoveredId && getCard(hoveredId);
     if ((k === 't' || k === ' ') && c && c.zone === 'battlefield') {
@@ -1469,13 +2536,43 @@
     }
   });
 
-  window.addEventListener('resize', () => S && renderHandAndPiles(me()));
+  window.addEventListener('resize', () => S && !U.phone && renderHandAndPiles(me()));
+
+  /* ========================================================= shared API */
+
+  const U = {
+    phone: false,
+    session: null,
+    status: null,
+    get S() {
+      return S;
+    },
+    get mode() {
+      return mode;
+    },
+    get firstState() {
+      return firstState;
+    },
+    views,
+    renderHooks,
+    $, $$, esc, clamp, sign, large, toast, dialog, askNumber, askText, confirmBox,
+    act, me, playerById, getCard, seatOrder, render, reconcile, cardEl, cardInner, faceBadges, summaryHTML, scryfallUrl,
+    cardMenu, libraryMenu, zoneBulkMenu, handMenu, showMenu, hideMenu,
+    countersDialog, ptDialog, effectsDialog, tokenDialog, deckDialog, settingsDialog, helpDialog,
+    openViewer, closeViewer, renderLog, startProliferate, startAttach, cancelMode, finishMode, modeClick,
+    dieEl, animateDie, trackFlick, randomFlick, D20_SVG,
+    leaveGame, copyInvite, startGameClick, playFromHand, resolveStack, isLandCard, handIndexAt, isEquipLike,
+    paneLayout, fitTray,
+  };
+  window.MTGUI = U;
 
   /* =============================================================== boot */
 
   setupLobby();
-  const q = new URLSearchParams(location.search);
-  if (q.get('host')) startHost(q.get('host').toUpperCase());
-  else if (q.get('join')) startJoin(q.get('join').toUpperCase());
-  else showLobby();
+  window.addEventListener('DOMContentLoaded', () => {
+    const q = new URLSearchParams(location.search);
+    if (q.get('host')) startHost(q.get('host').toUpperCase());
+    else if (q.get('join')) startJoin(q.get('join').toUpperCase());
+    else showLobby();
+  });
 })();

@@ -1,53 +1,75 @@
 # MTG Tabletop
 
-A free, browser-based tabletop for playing **Magic: The Gathering** with friends online.
+A free, browser-based tabletop for playing **Magic: The Gathering** with up to 4 friends online, on a computer or a phone.
 
-- **No server to run.** It's a plain website (host it free on GitHub Pages). The host's browser *is* the game. Friends connect straight to it, peer-to-peer.
-- **Games are saved** in the host's browser after every action. If someone drops out, they rejoin and everything is where it was. If the host closes the tab or restarts their PC, they reopen the game from the lobby and carry on.
-- **Archidekt decklists with the right art.** Paste Archidekt's text export and each card shows the exact printing (set + collector number) via Scryfall.
-- **A real table feel.** Card art on a battlefield you can zoom and scroll around, drag & drop between zones, tapping, counters, notes, tokens, a shared stack, graveyards/exile you can browse, commander damage and tax, life and poison, dice, chat and a game log.
-- **Rules aren't enforced.** Like a real table, you're in charge. Right-click any card → *Open on Scryfall* for its rulings.
+- **No server to run.** It's a plain website (host it free on GitHub Pages). The host's browser *is* the game, and friends connect straight to it, peer-to-peer.
+- **Games are saved** in the host's browser after every action. Anyone who drops out just reloads and rejoins. The host can close the tab or restart their PC and carry on later.
+- **Archidekt decklists with the right art.** Paste Archidekt's text export and each card shows the exact printing you picked (via Scryfall).
+- **Computer and phone layouts.** On a phone (landscape) the battlefield fills the screen, your hand sits along the bottom, and everything else is a tap away.
+- **Fair-play permission system.** Touching another player's battlefield, hand, library or life sends them an Allow / Deny request.
+- **Effects that do the maths.** Set up what cards do (anthems, equipment, "+1/+0 for each artifact", "enters with an extra counter", keywords). Power/toughness totals then update by themselves. A helper reads your cards' text when you import and suggests effects for you to approve.
+- **Undo**, a **flickable d20** (and a dice-off for turn order), **mulligans**, **proliferate**, **counters**, **equipment & auras**, **tokens**, **commander damage & tax**, **chat** and a **game log**.
+- **Rules aren't enforced.** Like a real table, you're in charge. Every card links to its Scryfall page for rulings.
 
-👉 **New here? Follow [docs/SETUP.md](docs/SETUP.md).** It walks through putting this on GitHub Pages (one time) and what to do each time you play.
+👉 **New here? Follow [docs/SETUP.md](docs/SETUP.md)** to put it on GitHub Pages (one time) and see what to do each time you play.
 
-## Quick tour
+## Quick tour (computer)
 
 | Do this | How |
 |---|---|
-| Move a card | Drag it: battlefield, hand, stack, your piles, or another player's battlefield |
-| Tap / untap | Click it on the battlefield, or hover + <kbd>T</kbd> |
-| See a card big | Hover it |
-| All card options | Right-click (counters, notes, transform, face down, token copy, move to…, **Open on Scryfall**) |
-| Draw | Click your library or press <kbd>D</kbd> |
-| Search / scry / mill / mulligan | Right-click your library |
-| Cast with a chance to respond | Drag to the **Stack**, double-click it there to resolve |
-| Zoom / scroll the battlefield | Mouse wheel / drag an empty spot / "fit" button |
-| Create tokens | **+ Token** (searches Scryfall), or right-click a card that makes tokens |
-| Life | ± buttons (<kbd>Shift</kbd> = 5), click the number to type it |
+| Move a card | Drag it: battlefield, hand (drop between cards to sort), stack, piles, another player's battlefield |
+| Tap / untap | Click it, or hover + <kbd>T</kbd> |
+| See a card big + its total P/T, counters, effects | Hover it |
+| All options | Right-click (counters, P/T bonus, effects, attach, transform, face down, move to…, Open on Scryfall) |
+| Cast so others can respond | Drag to the **Stack**. Right-click there for Resolves / Doesn't resolve |
+| Equipment / auras | Drag onto a creature |
+| Search your library | Right-click library → Search, then type (name matches first, then type/rules-text matches) |
+| See everyone | **All battlefields**: a grid in turn order (you bottom-left) |
+| Undo | **↶ Undo** or <kbd>Ctrl</kbd>+<kbd>Z</kbd> |
+| d20 | **d20** drops a die on your battlefield; flick it to roll, click it to remove |
+
+## Quick tour (phone, landscape)
+
+| Do this | How |
+|---|---|
+| Phases / pass turn | Top bar. Tap phases as you go, **Pass ▶** at the end |
+| Play a card | Drag it up out of your hand (lands → battlefield, everything else → stack) |
+| Look at a card in hand | Tap it |
+| Re-order your hand | Hold a card, then slide it sideways |
+| Battlefield | Drag to look around, pinch to zoom. Tap a land to tap it. Tap anything else for options. Hold + drag to move it |
+| Resolve the stack | Tap the spell → green **Resolves** / red **Doesn't resolve** |
+| Library, graveyard, exile, command zone | ☰ → **My zones** |
+| Watch opponents | ☰ → **All battlefields**, then tap one (their log and graveyard/exile sit alongside) |
+| Your life | Tap your life badge (bottom-right) |
 
 ## How it works
 
 ```
- Host's browser  ◄──── WebRTC data channel (encrypted, direct) ────►  Friend's browser
- (keeps + saves                                                        (shows the table,
-  the game state)                                                       sends actions)
+ Host's browser  ◄──── WebRTC data channel (encrypted, direct) ────►  Friends' browsers
+ (keeps + saves                                                        (show the table,
+  the game state)                                                       send actions)
           ▲                                                                    ▲
-          └──────── PeerJS cloud: only helps the two browsers find each other ┘
+          └──────── PeerJS cloud: only helps the browsers find each other ─────┘
 ```
 
-- `js/engine.js`: game state and every action (move, tap, counters, turns…). It also decides what each player is allowed to see (hidden hands and libraries).
-- `js/net.js`: hosting/joining over PeerJS, saving to the host's browser storage, reconnecting.
-- `js/importer.js`: decklist parsing and Scryfall lookups.
-- `js/ui.js`: everything on screen.
-- `test/`: automated tests for the engine and the decklist parser (`npm test`, needs Node.js 18+; optional).
+| File | What it does |
+|---|---|
+| `js/engine.js` | Game state and every action, plus hidden information, permissions, effects, P/T maths, turn order and dice physics |
+| `js/net.js` | Hosting/joining over PeerJS, saving to the host's browser, reconnecting, undo history |
+| `js/importer.js` | Decklist parsing, Scryfall lookups, and the effect-suggestion helper |
+| `js/ui.js` | Shared interface + the computer layout |
+| `js/phone.js` | The phone / touch layout |
+| `test/` | Automated tests (`npm test`, needs Node.js 18+; optional) |
 
 ## Good to know
 
-- **The host must have the game open** for anyone to play. Saved games live in the browser you host from, so use the same browser and the same site address. *Backup* (lobby or Settings) downloads a file you can restore later or on another PC.
+- **The host must have the game open** for anyone to play. Saved games live in the browser you host from, so use the same browser and the same site address. *Backup* (lobby or Settings) downloads a file you can restore later or on another device.
+- **Host from a computer if you can.** Phones pause pages when you switch apps or lock the screen, which disconnects everyone until you come back. Nothing is lost, though.
 - **Anyone with the game code can take an empty seat** (up to 4 players), so only share it with friends.
 - As with any peer-to-peer connection, the browsers learn each other's IP addresses. Nothing on your PC opens a port, and nothing runs once you close the tab.
 - Some strict networks (certain workplaces, schools or mobile carriers) block direct browser connections. If you can't connect, try a different network.
-- **Archidekt links:** Archidekt doesn't let other websites read decks, so paste the text export instead (see SETUP.md). The paste option keeps the exact art.
+- **Archidekt links:** Archidekt doesn't let other websites read decks, so paste the text export instead (see SETUP.md). It keeps the exact art.
+- **Undo** keeps the last 40 actions while the host's page is open. Shuffles, mulligans and dice rolls can't be undone, so nobody can re-roll or peek and rewind.
 
 ## Credits
 

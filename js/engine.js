@@ -76,6 +76,48 @@ function imageFromId(id, face = 'front', size = 'normal') {
   return `https://cards.scryfall.io/${size}/${face}/${id[0]}/${id[1]}/${id}.jpg`;
 }
 
+/** Parse "2/3" style power/toughness. Non-numbers (like *) come back as null. */
+function parsePT(pt) {
+  const m = /^\s*([^/]+)\/([^/]+)\s*$/.exec(pt || '');
+  if (!m) return null;
+  const n = (v) => (/^[+-]?\d+$/.test(v.trim()) ? Number(v) : null);
+  return { p: n(m[1]), t: n(m[2]), rawP: m[1].trim(), rawT: m[2].trim() };
+}
+const sign = (n) => (n >= 0 ? `+${n}` : `${n}`);
+
+/**
+ * Deterministic dice physics so every player sees the same bounce.
+ * Units are "table units"; returns frames [[x, y, rotationDeg], ...] at 60 fps.
+ */
+function simulateDie(sx, sy, vx, vy, W, H, size = 70) {
+  let x = sx;
+  let y = sy;
+  let sp = Math.hypot(vx, vy);
+  if (sp < 1) { vx = 400; vy = -300; sp = 500; }
+  if (sp < 450) { vx *= 450 / sp; vy *= 450 / sp; }
+  if (sp > 4500) { vx *= 4500 / sp; vy *= 4500 / sp; }
+  let rot = 0;
+  let vr = (vx - vy) * 0.9;
+  const frames = [];
+  for (let i = 0; i < 360; i++) {
+    x += vx / 60;
+    y += vy / 60;
+    if (x < 0) { x = -x; vx = -vx * 0.75; vr = -vr * 0.8; }
+    if (x > W - size) { x = 2 * (W - size) - x; vx = -vx * 0.75; vr = -vr * 0.8; }
+    if (y < 0) { y = -y; vy = -vy * 0.75; vr = -vr * 0.8; }
+    if (y > H - size) { y = 2 * (H - size) - y; vy = -vy * 0.75; vr = -vr * 0.8; }
+    x = Math.max(0, Math.min(W - size, x));
+    y = Math.max(0, Math.min(H - size, y));
+    vx *= 0.962; vy *= 0.962; vr *= 0.955;
+    rot += vr / 60;
+    frames.push([Math.round(x * 10) / 10, Math.round(y * 10) / 10, Math.round(rot * 10) / 10]);
+    if (i > 40 && Math.hypot(vx, vy) < 12) break;
+  }
+  return frames;
+}
+const TRAY_W = 900;
+const TRAY_H = 420;
+
 function getPlayer(game, id) {
   return game.players.find((p) => p.id === id) || null;
 }
@@ -107,6 +149,11 @@ function createGame({ name, format } = {}) {
     cards: {},
     stack: [],
     turn: { active: null, number: 1, phase: 0 },
+    order: [], // turn order (player ids), set by the opening d20 roll
+    setup: null, // opening mulligan / roll-for-turn-order state
+    dice: {}, // d20s sitting on battlefields
+    requests: [], // permission requests waiting for an answer
+    nextSeq: 1,
     log: [],
     nextLogId: 1,
   };
@@ -126,6 +173,7 @@ function newPlayer(game, name) {
     handRevealed: false,
     deckName: null,
     deck: null,
+    bfColor: null,
     zones: {},
   };
   for (const z of PLAYER_ZONES) p.zones[z] = [];
@@ -164,6 +212,12 @@ function cleanTemplate(t) {
     backName: str(t.backName, 150) || null,
     typeLine: str(t.typeLine, 150),
     pt: str(t.pt, 12) || null,
+    backPt: str(t.backPt, 12) || null,
+    backTypeLine: str(t.backTypeLine, 150),
+    manaCost: str(t.manaCost, 60),
+    oracle: str(t.oracle, 1500),
+    backOracle: str(t.backOracle, 1500),
+    effects: cleanEffects(t.effects),
     scryfallUri: safeScryfallUrl(t.scryfallUri),
     isCommander: !!t.isCommander,
     tokens: Array.isArray(t.tokens)
@@ -173,6 +227,75 @@ function cleanTemplate(t) {
           .filter((k) => k.name)
       : [],
   };
+}
+
+const WHO = ['self', 'attached', 'yours', 'yoursOther', 'opponents', 'all'];
+const WHERE = ['you', 'opp', 'all', 'yourGraveyard'];
+const KINDS = ['pt', 'forEach', 'etb', 'keyword'];
+
+/** Effects are small structured rules a player builds (or approves) for a card. */
+function cleanEffects(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const e of list.slice(0, 12)) {
+    if (!e || !KINDS.includes(e.kind)) continue;
+    const eff = { kind: e.kind, on: e.on !== false };
+    if (e.kind === 'pt' || e.kind === 'etb' || e.kind === 'keyword') {
+      eff.who = WHO.includes(e.who) ? e.who : 'self';
+      eff.filter = str(String(e.filter || '').trim(), 30);
+    }
+    if (e.kind === 'pt' || e.kind === 'forEach') {
+      eff.p = int(e.p, -99, 99, 0);
+      eff.t = int(e.t, -99, 99, 0);
+    }
+    if (e.kind === 'forEach') {
+      eff.count = str(String(e.count || 'creature').trim(), 30) || 'creature';
+      eff.where = WHERE.includes(e.where) ? e.where : 'you';
+      eff.other = !!e.other;
+    }
+    if (e.kind === 'etb') {
+      eff.n = int(e.n, 1, 20, 1);
+      eff.counter = str(String(e.counter || '+1/+1').trim(), 20) || '+1/+1';
+    }
+    if (e.kind === 'keyword') eff.keyword = str(String(e.keyword || '').trim(), 30);
+    if (e.kind === 'keyword' && !eff.keyword) continue;
+    if (e.note) eff.note = str(e.note, 80);
+    out.push(eff);
+  }
+  return out;
+}
+
+const WHO_TEXT = {
+  self: 'This creature',
+  attached: 'Equipped/enchanted creature',
+  yours: 'Creatures you control',
+  yoursOther: 'Other creatures you control',
+  opponents: "Creatures your opponents control",
+  all: 'All creatures',
+};
+const WHERE_TEXT = { you: 'you control', opp: 'your opponents control', all: 'on the battlefield', yourGraveyard: 'in your graveyard' };
+
+/** Human-readable sentence for an effect, e.g. "Other Elf creatures you control get +1/+1". */
+function describeEffect(e) {
+  const who = () => {
+    if (e.who === 'self' || e.who === 'attached' || !WHO_TEXT[e.who]) return WHO_TEXT[e.who] || 'This creature';
+    const [pre, rest] = { yours: ['', 'creatures you control'], yoursOther: ['other ', 'creatures you control'], opponents: ['', 'creatures your opponents control'], all: ['all ', 'creatures'] }[e.who];
+    const out = `${pre}${e.filter ? `${e.filter} ` : ''}${rest}`;
+    return out[0].toUpperCase() + out.slice(1);
+  };
+  const plural = e.who !== 'self' && e.who !== 'attached';
+  switch (e.kind) {
+    case 'pt':
+      return `${who()} ${plural ? 'get' : 'gets'} ${sign(e.p)}/${sign(e.t)}`;
+    case 'forEach':
+      return `This creature gets ${sign(e.p)}/${sign(e.t)} for each ${e.other ? 'other ' : ''}${e.count} ${WHERE_TEXT[e.where]}`;
+    case 'etb':
+      return `${who()} ${plural ? 'enter' : 'enters'} with ${e.n} extra ${e.counter} counter${e.n === 1 ? '' : 's'}`;
+    case 'keyword':
+      return `${who()} ${plural ? 'have' : 'has'} ${e.keyword}`;
+    default:
+      return '';
+  }
 }
 
 function instantiate(game, tpl, ownerId, extra = {}) {
@@ -189,6 +312,14 @@ function instantiate(game, tpl, ownerId, extra = {}) {
     backName: tpl.backName || null,
     typeLine: tpl.typeLine || '',
     pt: tpl.pt || null,
+    backPt: tpl.backPt || null,
+    backTypeLine: tpl.backTypeLine || '',
+    manaCost: tpl.manaCost || '',
+    oracle: tpl.oracle || '',
+    backOracle: tpl.backOracle || '',
+    effects: cleanEffects(tpl.effects),
+    ptMod: { p: 0, t: 0 },
+    attachedTo: null,
     scryfallUri: tpl.scryfallUri || null,
     tokens: tpl.tokens || [],
     isCommander: !!tpl.isCommander,
@@ -232,6 +363,8 @@ function placeIn(game, card, zone, pid, opts = {}) {
     if (opts.pos === 'bottom') arr.push(card.id);
     else if (Number.isInteger(opts.pos)) arr.splice(Math.max(0, Math.min(arr.length, opts.pos)), 0, card.id);
     else arr.unshift(card.id); // index 0 is the top of the library
+  } else if (Number.isInteger(opts.pos)) {
+    arr.splice(Math.max(0, Math.min(arr.length, opts.pos)), 0, card.id);
   } else {
     arr.push(card.id); // graveyard/exile: last element is the top
   }
@@ -248,11 +381,39 @@ function removeOwnedCards(game, pid) {
   for (const c of Object.values(game.cards)) if (c.owner === pid) destroyCard(game, c);
 }
 
+const currentType = (card) => (card.flipped && card.backTypeLine ? card.backTypeLine : card.typeLine) || '';
 function isLand(card) {
-  return /\bLand\b/.test(card.typeLine || '') && !/\bCreature\b/.test(card.typeLine || '');
+  return /\bLand\b/.test(currentType(card)) && !/\bCreature\b/.test(currentType(card));
 }
 function isCreature(card) {
-  return /\bCreature\b/.test(card.typeLine || '');
+  return /\bCreature\b/.test(currentType(card));
+}
+/** Does a card's type line contain this word (e.g. "Dragon", "artifact")? Handles simple plurals. */
+function hasType(card, word) {
+  if (!word) return true;
+  let w = word.trim().toLowerCase();
+  if (w === 'card' || w === 'permanent') return true;
+  const tl = currentType(card).toLowerCase();
+  const re = (x) => new RegExp(`(^|[^a-z])${x.replace(/[^a-z' -]/g, '')}([^a-z]|$)`);
+  if (re(w).test(tl)) return true;
+  const singular = w.endsWith('ves') ? w.slice(0, -3) + 'f' : w.endsWith('ies') ? w.slice(0, -3) + 'y' : w.endsWith('s') ? w.slice(0, -1) : w;
+  return singular !== w && re(singular).test(tl);
+}
+
+/** Add counters, letting +1/+1 and -1/-1 cancel each other out like the real rules. */
+function addCounter(card, name, delta) {
+  if (name === '+1/+1' || name === '-1/-1') {
+    const net = (card.counters['+1/+1'] || 0) - (card.counters['-1/-1'] || 0) + (name === '+1/+1' ? delta : -delta);
+    delete card.counters['+1/+1'];
+    delete card.counters['-1/-1'];
+    if (net > 0) card.counters['+1/+1'] = net;
+    if (net < 0) card.counters['-1/-1'] = -net;
+    return net;
+  }
+  const v = (card.counters[name] || 0) + delta;
+  if (v <= 0) delete card.counters[name];
+  else card.counters[name] = v;
+  return v;
 }
 
 function autoPlace(game, pid, card) {
@@ -279,6 +440,132 @@ function resetCardState(card) {
   card.faceDown = false;
   card.counters = {};
   card.note = '';
+  card.ptMod = { p: 0, t: 0 };
+  card.attachedTo = null;
+}
+
+/** When a permanent leaves, anything attached to it falls off (stays on the battlefield). */
+function dropAttachments(game, card) {
+  for (const c of Object.values(game.cards)) if (c.attachedTo === card.id) c.attachedTo = null;
+}
+
+/** Effect "who" matching: does source effect e (on card src) apply to target card t? */
+function effectHits(game, e, src, t) {
+  if (!isCreature(t) && e.who !== 'self' && e.who !== 'attached') return false;
+  switch (e.who) {
+    case 'self':
+      if (t.id !== src.id) return false;
+      break;
+    case 'attached':
+      if (src.attachedTo !== t.id) return false;
+      break;
+    case 'yours':
+      if (t.zp !== src.zp) return false;
+      break;
+    case 'yoursOther':
+      if (t.zp !== src.zp || t.id === src.id) return false;
+      break;
+    case 'opponents':
+      if (t.zp === src.zp) return false;
+      break;
+    case 'all':
+      break;
+    default:
+      return false;
+  }
+  return !e.filter || e.who === 'self' || e.who === 'attached' ? true : hasType(t, e.filter);
+}
+
+function effectSources(game) {
+  const out = [];
+  for (const p of game.players)
+    for (const id of p.zones.battlefield) {
+      const c = game.cards[id];
+      if (c && !c.faceDown) for (const e of c.effects || []) if (e.on) out.push([c, e]);
+    }
+  return out;
+}
+
+/** Apply "enters with extra counters" effects to a card that just entered. Returns log notes. */
+function applyEtbEffects(game, card) {
+  const notes = [];
+  if (card.faceDown) return notes;
+  const sources = effectSources(game);
+  for (const e of card.effects || []) if (e.on && e.kind === 'etb' && e.who === 'self') sources.push([card, e]);
+  for (const [src, e] of sources) {
+    if (e.kind !== 'etb') continue;
+    if (e.who === 'self' ? src.id !== card.id : !effectHits(game, e, src, card)) continue;
+    addCounter(card, e.counter, e.n);
+    notes.push(`+${e.n} ${e.counter} from ${src.id === card.id ? 'itself' : src.name}`);
+  }
+  return notes;
+}
+
+function countFor(game, e, src) {
+  let n = 0;
+  if (e.where === 'yourGraveyard') {
+    const p = getPlayer(game, src.zp);
+    for (const id of p ? p.zones.graveyard : []) if (hasType(game.cards[id], e.count)) n++;
+    return n;
+  }
+  for (const p of game.players) {
+    if (e.where === 'you' && p.id !== src.zp) continue;
+    if (e.where === 'opp' && p.id === src.zp) continue;
+    for (const id of p.zones.battlefield) {
+      const c = game.cards[id];
+      if (!c || c.faceDown) continue;
+      if (e.other && c.id === src.id) continue;
+      if (hasType(c, e.count)) n++;
+    }
+  }
+  return n;
+}
+
+/**
+ * Work out every battlefield card's final power/toughness, with a breakdown
+ * of where each bonus came from, plus granted keywords.
+ */
+function computeStats(game) {
+  const stats = {};
+  const sources = effectSources(game);
+  for (const p of game.players)
+    for (const id of p.zones.battlefield) {
+      const c = game.cards[id];
+      if (!c || c.faceDown) continue;
+      const base = parsePT(c.flipped && c.backPt ? c.backPt : c.pt);
+      const parts = [];
+      const net = (c.counters['+1/+1'] || 0) - (c.counters['-1/-1'] || 0);
+      if (net) parts.push({ src: 'counters', p: net, t: net, counter: true });
+      if (c.ptMod && (c.ptMod.p || c.ptMod.t)) parts.push({ src: 'manual bonus', p: c.ptMod.p, t: c.ptMod.t, manual: true });
+      const keywords = [];
+      for (const [src, e] of sources) {
+        if (e.kind === 'pt' && effectHits(game, e, src, c) && (e.p || e.t)) parts.push({ src: src.name, p: e.p, t: e.t });
+        if (e.kind === 'forEach' && src.id === c.id) {
+          const n = countFor(game, e, src);
+          if (n) parts.push({ src: `${src.name} (${n} ${e.count}${n === 1 ? '' : 's'})`, p: e.p * n, t: e.t * n });
+        }
+        if (e.kind === 'keyword' && effectHits(game, e, src, c)) keywords.push({ keyword: e.keyword, src: src.name });
+      }
+      if (!base && !parts.length && !keywords.length) continue;
+      const sp = parts.reduce((s, x) => s + x.p, 0);
+      const st = parts.reduce((s, x) => s + x.t, 0);
+      const fx = parts.filter((x) => !x.counter);
+      const total = base
+        ? {
+            p: base.p != null ? String(base.p + sp) : `${base.rawP}${sp ? sign(sp) : ''}`,
+            t: base.t != null ? String(base.t + st) : `${base.rawT}${st ? sign(st) : ''}`,
+          }
+        : null;
+      stats[id] = {
+        base: base ? `${base.rawP}/${base.rawT}` : null,
+        total: total ? `${total.p}/${total.t}` : null,
+        parts,
+        keywords,
+        // sum of non-counter bonuses (manual + effects), shown as one badge on the card
+        fx: fx.length ? { p: fx.reduce((s, x) => s + x.p, 0), t: fx.reduce((s, x) => s + x.t, 0) } : null,
+      };
+    }
+  return stats;
 }
 
 /** Display name used in the log, hiding hidden information. */
@@ -313,6 +600,7 @@ function moveCard(game, actor, a, { quiet = false } = {}) {
   // Tokens stop existing once they leave the battlefield / stack.
   if (card.isToken && to !== 'battlefield' && to !== 'stack') {
     if (!quiet) addLog(game, `${actor.name}: token ${card.name} left the battlefield and was removed.`);
+    dropAttachments(game, card);
     destroyCard(game, card);
     return;
   }
@@ -320,7 +608,9 @@ function moveCard(game, actor, a, { quiet = false } = {}) {
   if (fromZone === 'command' && card.isCommander && (to === 'battlefield' || to === 'stack')) card.castCount += 1;
 
   const sameBattlefield = fromZone === 'battlefield' && to === 'battlefield';
+  if (fromZone === 'hand' && to === 'hand' && fromP === destP) quiet = true; // just re-sorting a hand
   detach(game, card);
+  if (fromZone === 'battlefield' && to !== 'battlefield') dropAttachments(game, card);
 
   if (!sameBattlefield) {
     const keepFaceDown = fromZone === 'battlefield' && to === 'battlefield';
@@ -336,6 +626,7 @@ function moveCard(game, actor, a, { quiet = false } = {}) {
     }
   }
   placeIn(game, card, to, destP, { pos: a.pos });
+  const etb = to === 'battlefield' && fromZone !== 'battlefield' ? applyEtbEffects(game, card) : [];
 
   if (!quiet) {
     const nm = logName(card, fromZone, to);
@@ -347,6 +638,7 @@ function moveCard(game, actor, a, { quiet = false } = {}) {
     else if (fromZone === 'command' && (to === 'stack' || to === 'battlefield'))
       text = `${actor.name} cast ${nm} from the command zone (cast ${card.castCount} time${card.castCount === 1 ? '' : 's'}).`;
     else text = `${actor.name} moved ${nm} from ${from} to ${dest}.`;
+    if (etb.length) text += ` It entered with ${etb.join(', ')}.`;
     addLog(game, text);
   }
 }
@@ -386,8 +678,177 @@ function resetPlayerState(game, p) {
 
 /* ---------------------------------------------------------------- actions */
 
-function applyAction(game, actor, a) {
+/** Turn order: from the opening roll, plus anyone who joined later. */
+function turnOrder(game) {
+  const order = (game.order || []).filter((id) => getPlayer(game, id));
+  for (const p of game.players) if (!order.includes(p.id)) order.push(p.id);
+  return order;
+}
+
+function resolveTurnOrder(game) {
+  const st = game.setup;
+  const res = st.results;
+  const cmp = (a, b) => {
+    const ra = res[a] || [];
+    const rb = res[b] || [];
+    for (let i = 0; i < Math.max(ra.length, rb.length); i++) {
+      const x = ra[i] || 0;
+      const y = rb[i] || 0;
+      if (x !== y) return y - x;
+    }
+    return 0;
+  };
+  const sorted = st.rollers.slice().sort(cmp);
+  const tied = new Set();
+  for (let i = 0; i < sorted.length - 1; i++)
+    if (cmp(sorted[i], sorted[i + 1]) === 0) {
+      tied.add(sorted[i]);
+      tied.add(sorted[i + 1]);
+    }
+  if (tied.size) {
+    st.eligible = [...tied];
+    st.round += 1;
+    addLog(game, `Tie between ${[...tied].map((id) => getPlayer(game, id).name).join(' and ')}! Roll again.`, { kind: 'turn' });
+    return;
+  }
+  game.order = sorted.concat(game.players.map((p) => p.id).filter((id) => !sorted.includes(id)));
+  game.turn = { active: sorted[0], number: 1, phase: 1 };
+  st.stage = 'done';
+  addLog(game, `Turn order: ${game.order.map((id) => getPlayer(game, id).name).join(' → ')}. ${getPlayer(game, sorted[0]).name} goes first!`, {
+    kind: 'turn',
+  });
+}
+
+/* ------------------------------------------------------------ permission */
+
+const UNDO_BARRIERS = new Set(['shuffle', 'mulligan', 'startGame', 'rollInitiative', 'rollDie', 'roll', 'coin']);
+
+/** Returns the id of the player who must approve this action, or null. */
+function needsPermission(game, actor, a) {
+  const other = (pid) => (pid && pid !== actor.id && getPlayer(game, pid) ? pid : null);
+  const cardVictim = (id) => {
+    const c = game.cards[id];
+    if (!c) return null;
+    return ['battlefield', 'hand', 'library'].includes(c.zone) ? other(c.zp) : null;
+  };
+  switch (a.type) {
+    case 'tap':
+      if (Array.isArray(a.cardIds)) {
+        for (const id of a.cardIds) {
+          const v = cardVictim(id);
+          if (v) return v;
+        }
+        return null;
+      }
+      return cardVictim(a.cardId);
+    case 'move':
+    case 'position':
+    case 'cardCounter':
+    case 'flip':
+    case 'faceDown':
+    case 'note':
+    case 'setPtMod':
+    case 'setEffects':
+    case 'unattach':
+      return cardVictim(a.cardId);
+    case 'attach':
+      return cardVictim(a.cardId) || cardVictim(a.targetId);
+    case 'untapAll':
+    case 'life':
+    case 'setLife':
+    case 'playerCounter':
+    case 'cmdDamage':
+    case 'createToken':
+      return other(a.playerId);
+    case 'viewZone':
+      return a.zone === 'library' ? other(a.playerId) : null;
+    default:
+      return null;
+  }
+}
+
+/** Plain-English description of an action, written for the person being asked. */
+function describeRequest(game, actor, a) {
+  const c = a.cardId ? game.cards[a.cardId] : null;
+  const nm = c ? (c.faceDown ? 'a face-down card' : c.zone === 'hand' || c.zone === 'library' ? `a card in your ${c.zone}` : c.name) : 'a card';
+  const n = Math.abs(Number(a.delta) || 0);
+  switch (a.type) {
+    case 'move': {
+      let where;
+      if (a.to === 'battlefield') where = a.playerId === actor.id ? 'their battlefield (take control of it)' : 'the battlefield';
+      else if (a.to === 'library') where = `the ${a.pos === 'bottom' ? 'bottom' : 'top'} of its owner's library`;
+      else if (a.to === 'stack') where = 'the stack';
+      else where = `its owner's ${a.to}`;
+      return `move ${nm} to ${where}`;
+    }
+    case 'position':
+      return `rearrange ${nm} on your battlefield`;
+    case 'tap':
+      if (Array.isArray(a.cardIds)) return `tap/untap ${a.cardIds.length} of your permanents`;
+      return `${c && c.tapped ? 'untap' : 'tap'} ${nm}`;
+    case 'cardCounter':
+      return `${a.delta > 0 ? 'put' : 'remove'} ${n} ${a.name} counter${n === 1 ? '' : 's'} ${a.delta > 0 ? 'on' : 'from'} ${nm}`;
+    case 'flip':
+      return `transform ${nm}`;
+    case 'faceDown':
+      return `turn ${nm} face ${c && c.faceDown ? 'up' : 'down'}`;
+    case 'note':
+      return `put a note on ${nm}: "${str(String(a.text || ''), 80)}"`;
+    case 'setPtMod':
+      return `give ${nm} a ${sign(int(a.p, -99, 99, 0))}/${sign(int(a.t, -99, 99, 0))} bonus`;
+    case 'setEffects':
+      return `change the effects on ${nm}`;
+    case 'attach': {
+      const t = game.cards[a.targetId];
+      return `attach ${c ? c.name : 'a card'} to ${t ? t.name : 'a card'}`;
+    }
+    case 'unattach':
+      return `unattach ${nm}`;
+    case 'untapAll':
+      return 'untap all your permanents';
+    case 'life':
+      return `make you ${a.delta > 0 ? 'gain' : 'lose'} ${n} life`;
+    case 'setLife':
+      return `set your life to ${int(a.value, -9999, 9999, 0)}`;
+    case 'playerCounter':
+      return `${a.delta > 0 ? 'give you' : 'remove'} ${n} ${a.name} counter${n === 1 ? '' : 's'}`;
+    case 'cmdDamage': {
+      const src = game.cards[a.sourceId];
+      return `${a.delta > 0 ? 'deal you' : 'remove'} ${n} commander damage${src ? ` from ${src.name}` : ''}`;
+    }
+    case 'createToken':
+      return `create ${int(a.count, 1, 30, 1)} ${str(a.name, 60) || 'token'} token(s) on your battlefield`;
+    case 'viewZone':
+      return a.count ? `look at the top ${int(a.count, 1, 99, 1)} cards of your library` : 'search your library';
+    case 'undo':
+      return 'undo your last action';
+    default:
+      return a.type;
+  }
+}
+
+function createRequest(game, actor, victimId, action) {
+  if (game.requests.filter((r) => r.from === actor.id).length >= 5) fail('You already have several requests waiting. Wait for answers (or cancel some).');
+  const victim = needPlayer(game, victimId);
+  const req = {
+    id: rid(4),
+    from: actor.id,
+    to: victim.id,
+    action: JSON.parse(JSON.stringify(action)),
+    text: describeRequest(game, actor, action),
+    t: Date.now(),
+  };
+  game.requests.push(req);
+  addLog(game, `${actor.name} asked ${victim.name} for permission to ${req.text}.`, { kind: 'warn' });
+  return { pendingRequest: req.id, waitingFor: victim.name };
+}
+
+function applyAction(game, actor, a, opts = {}) {
   if (!a || typeof a !== 'object') fail('Bad action.');
+  if (!opts.approved) {
+    const victim = needsPermission(game, actor, a);
+    if (victim) return createRequest(game, actor, victim, a);
+  }
   const t = a.type;
   let result = {};
 
@@ -472,6 +933,8 @@ function applyAction(game, actor, a) {
       break;
 
     case 'mulligan': {
+      const st = game.setup;
+      if (st && st.stage === 'mulligan' && st.kept[actor.id]) fail('You already kept your hand.');
       for (const id of actor.zones.hand.slice()) {
         const c = game.cards[id];
         detach(game, c);
@@ -479,7 +942,188 @@ function applyAction(game, actor, a) {
       }
       shuffle(actor.zones.library);
       drawCards(game, actor, 7);
-      addLog(game, `${actor.name} took a mulligan and drew a new 7 (put cards on the bottom as needed).`);
+      if (st && st.stage === 'mulligan') {
+        st.mulls[actor.id] = (st.mulls[actor.id] || 0) + 1;
+        addLog(game, `${actor.name} mulliganed (mulligan #${st.mulls[actor.id]}).`);
+      } else addLog(game, `${actor.name} shuffled their hand away and drew a new 7.`);
+      break;
+    }
+
+    case 'keep': {
+      const st = game.setup;
+      if (!st || st.stage !== 'mulligan') fail('There is nothing to keep right now.');
+      if (!st.rollers.includes(actor.id)) fail("You don't have a deck in this game.");
+      st.kept[actor.id] = true;
+      const m = st.mulls[actor.id] || 0;
+      addLog(game, `${actor.name} kept their hand${m ? ` after ${m} mulligan${m === 1 ? '' : 's'}` : ''}.`);
+      if (st.rollers.every((id) => st.kept[id])) {
+        st.stage = 'roll';
+        st.eligible = st.rollers.slice();
+        addLog(game, 'Everyone has kept. Flick your d20 to roll for turn order!', { kind: 'turn' });
+      }
+      break;
+    }
+
+    case 'rollInitiative': {
+      const st = game.setup;
+      if (!st || st.stage !== 'roll') fail('Not rolling for turn order right now.');
+      if (!st.eligible.includes(actor.id)) fail('You have already rolled. Waiting for the others.');
+      const v = randomInt(20) + 1;
+      (st.results[actor.id] = st.results[actor.id] || []).push(v);
+      st.eligible = st.eligible.filter((x) => x !== actor.id);
+      const idx = st.rollers.indexOf(actor.id);
+      st.anims[actor.id] = {
+        seq: game.nextSeq++,
+        value: v,
+        sx: 60 + idx * ((TRAY_W - 200) / Math.max(1, st.rollers.length - 1 || 1)),
+        sy: TRAY_H - 110,
+        vx: num(a.vx, -6000, 6000, 600),
+        vy: num(a.vy, -6000, 6000, -800),
+      };
+      addLog(game, `${actor.name} rolled ${v} for turn order.`, { kind: 'roll' });
+      if (!st.eligible.length) resolveTurnOrder(game);
+      break;
+    }
+
+    case 'closeSetup':
+      if (game.setup && game.setup.stage === 'done') game.setup = null;
+      break;
+
+    case 'placeDie': {
+      const mine = Object.values(game.dice).filter((d) => d.owner === actor.id);
+      if (mine.length >= 3) fail('You already have 3 dice out. Tap one to remove it.');
+      const id = rid(3);
+      game.dice[id] = { id, owner: actor.id, x: TABLE_W / 2 - 35 + mine.length * 90, y: TABLE_H / 2 - 35, value: null, seq: 0 };
+      break;
+    }
+
+    case 'rollDie': {
+      const d = game.dice[a.dieId] || fail('That die is gone.');
+      if (d.owner !== actor.id) fail("That's not your die.");
+      if (Number.isFinite(Number(a.x)) && Number.isFinite(Number(a.y))) {
+        d.x = num(a.x, 0, TABLE_W - 70, d.x);
+        d.y = num(a.y, 0, TABLE_H - 70, d.y);
+      }
+      const frames = simulateDie(d.x, d.y, num(a.vx, -6000, 6000, 600), num(a.vy, -6000, 6000, -600), TABLE_W, TABLE_H);
+      d.sx = d.x;
+      d.sy = d.y;
+      d.vx = num(a.vx, -6000, 6000, 600);
+      d.vy = num(a.vy, -6000, 6000, -600);
+      [d.x, d.y] = frames[frames.length - 1];
+      d.value = randomInt(20) + 1;
+      d.seq = game.nextSeq++;
+      addLog(game, `${actor.name} rolled a d20: ${d.value}`, { kind: 'roll' });
+      break;
+    }
+
+    case 'removeDie': {
+      const d = game.dice[a.dieId];
+      if (d && d.owner === actor.id) delete game.dice[a.dieId];
+      break;
+    }
+
+    case 'setColor': {
+      const c = String(a.color || '');
+      actor.bfColor = /^#[0-9a-f]{6}$/i.test(c) ? c : null;
+      break;
+    }
+
+    case 'setPtMod': {
+      const c = needCard(game, a.cardId);
+      c.ptMod = { p: int(a.p, -99, 99, 0), t: int(a.t, -99, 99, 0) };
+      addLog(game, c.ptMod.p || c.ptMod.t ? `${actor.name} gave ${c.name} a ${sign(c.ptMod.p)}/${sign(c.ptMod.t)} bonus.` : `${actor.name} cleared the bonus on ${c.name}.`);
+      break;
+    }
+
+    case 'setEffects': {
+      const c = needCard(game, a.cardId);
+      const effects = cleanEffects(a.effects);
+      // every copy of this card owned by the same player, plus their saved deck list
+      for (const x of Object.values(game.cards)) if (x.owner === c.owner && x.name === c.name && !x.isToken) x.effects = JSON.parse(JSON.stringify(effects));
+      if (c.isToken) c.effects = effects;
+      const owner = getPlayer(game, c.owner);
+      if (owner && owner.deck) for (const tpl of owner.deck.cards) if (tpl.name === c.name) tpl.effects = JSON.parse(JSON.stringify(effects));
+      addLog(game, `${actor.name} updated the effects on ${c.name}${effects.length ? `: ${effects.map(describeEffect).join('; ')}` : ' (none)'}.`);
+      result.effectsSaved = { owner: c.owner, name: c.name, effects };
+      break;
+    }
+
+    case 'attach': {
+      const c = needCard(game, a.cardId);
+      const target = needCard(game, a.targetId);
+      if (c.zone !== 'battlefield' || target.zone !== 'battlefield') fail('Both cards need to be on the battlefield.');
+      if (c.id === target.id || target.attachedTo === c.id) fail("Can't attach that there.");
+      c.attachedTo = target.id;
+      for (const x of Object.values(game.cards)) if (x.attachedTo === c.id) x.attachedTo = null;
+      addLog(game, `${actor.name} attached ${c.name} to ${target.faceDown ? 'a face-down card' : target.name}.`);
+      break;
+    }
+
+    case 'unattach': {
+      const c = needCard(game, a.cardId);
+      if (!c.attachedTo) break;
+      const t = game.cards[c.attachedTo];
+      c.attachedTo = null;
+      if (t && t.zp === c.zp) {
+        c.x = Math.min(TABLE_W - CARD_W, t.x + 120);
+        c.y = t.y;
+      } else autoPlace(game, c.zp, c);
+      addLog(game, `${actor.name} unattached ${c.name}.`);
+      break;
+    }
+
+    case 'proliferate': {
+      const names = [];
+      for (const id of (Array.isArray(a.cardIds) ? a.cardIds : []).slice(0, 200)) {
+        const c = game.cards[id];
+        if (!c || c.zone !== 'battlefield') continue;
+        const kinds = Object.keys(c.counters);
+        if (!kinds.length) continue;
+        for (const k of kinds) addCounter(c, k, 1);
+        names.push(c.faceDown ? 'a face-down card' : c.name);
+      }
+      for (const pid of (Array.isArray(a.playerIds) ? a.playerIds : []).slice(0, 8)) {
+        const p = getPlayer(game, pid);
+        if (!p || !Object.keys(p.counters).length) continue;
+        for (const k of Object.keys(p.counters)) p.counters[k] += 1;
+        names.push(p.name);
+      }
+      addLog(game, names.length ? `${actor.name} proliferated: ${names.join(', ')}.` : `${actor.name} proliferated (nothing had counters).`);
+      break;
+    }
+
+    case 'reorderHand': {
+      const c = needCard(game, a.cardId);
+      if (c.zone !== 'hand' || c.zp !== actor.id) fail('That card is not in your hand.');
+      detach(game, c);
+      placeIn(game, c, 'hand', actor.id, { pos: int(a.index, 0, 200, 0) });
+      return { quiet: true };
+    }
+
+    case 'respond': {
+      const i = game.requests.findIndex((r) => r.id === a.requestId);
+      if (i < 0) fail('That request is no longer waiting.');
+      const r = game.requests[i];
+      if (r.to !== actor.id) fail('That request is not for you.');
+      game.requests.splice(i, 1);
+      const from = getPlayer(game, r.from);
+      if (!from) break;
+      if (!a.allow) {
+        addLog(game, `${actor.name} said no to ${from.name}'s request to ${r.text}.`, { kind: 'warn' });
+        return { denied: true, notify: { to: from.id, text: `${actor.name} said no to: ${r.text}.` } };
+      }
+      addLog(game, `${actor.name} allowed ${from.name} to ${r.text}.`);
+      if (r.action.type === 'undo') return { undoApproved: true, requesterId: from.id };
+      const res = applyAction(game, from, r.action, { approved: true }) || {};
+      return { ...res, privateFor: from.id, appliedBy: from.id, appliedType: r.action.type };
+    }
+
+    case 'cancelRequest': {
+      const i = game.requests.findIndex((r) => r.id === a.requestId && r.from === actor.id);
+      if (i >= 0) {
+        addLog(game, `${actor.name} cancelled their request to ${game.requests[i].text}.`);
+        game.requests.splice(i, 1);
+      }
       break;
     }
 
@@ -538,10 +1182,11 @@ function applyAction(game, actor, a) {
       const c = needCard(game, a.cardId);
       const name = str(String(a.name || '').trim(), 20);
       if (!name) fail('Counter needs a name.');
-      const v = (c.counters[name] || 0) + int(a.delta, -100, 100, 0);
-      if (v <= 0) delete c.counters[name];
-      else c.counters[name] = v;
-      addLog(game, `${actor.name}: ${c.faceDown ? 'face-down card' : c.name} now has ${Math.max(v, 0)} ${name} counter${v === 1 ? '' : 's'}.`);
+      const v = addCounter(c, name, int(a.delta, -100, 100, 0));
+      const nm = c.faceDown ? 'face-down card' : c.name;
+      if (name === '+1/+1' || name === '-1/-1')
+        addLog(game, `${actor.name}: ${nm} now has ${v === 0 ? 'no +1/+1 or -1/-1 counters' : v > 0 ? `${v} +1/+1 counter${v === 1 ? '' : 's'}` : `${-v} -1/-1 counter${v === -1 ? '' : 's'}`}.`);
+      else addLog(game, `${actor.name}: ${nm} now has ${Math.max(v, 0)} ${name} counter${v === 1 ? '' : 's'}.`);
       break;
     }
 
@@ -636,9 +1281,10 @@ function applyAction(game, actor, a) {
 
     case 'passTurn': {
       if (!game.players.length) break;
-      let idx = game.players.findIndex((p) => p.id === game.turn.active);
-      idx = (idx + 1) % game.players.length;
-      const next = game.players[idx];
+      const order = turnOrder(game);
+      let idx = order.indexOf(game.turn.active);
+      idx = (idx + 1) % order.length;
+      const next = getPlayer(game, order[idx]);
       game.turn.active = next.id;
       game.turn.number += 1;
       game.turn.phase = 0;
@@ -707,11 +1353,12 @@ function applyAction(game, actor, a) {
       }
       // leftover tokens / cards of players without decks
       for (const c of Object.values(game.cards)) if (!getPlayer(game, c.owner)) destroyCard(game, c);
-      const first = game.players[randomInt(game.players.length)];
-      game.turn = { active: first.id, number: 1, phase: 1 };
-      addLog(game, `${actor.name} started a new game. Everyone shuffled and drew 7. ${first.name} goes first (randomly chosen).`, {
-        kind: 'turn',
-      });
+      game.dice = {};
+      game.requests = [];
+      game.order = [];
+      game.turn = { active: null, number: 1, phase: 0 };
+      game.setup = { stage: 'mulligan', rollers: withDecks.map((p) => p.id), kept: {}, mulls: {}, results: {}, eligible: [], anims: {}, round: 1 };
+      addLog(game, `${actor.name} started a new game. Everyone shuffled and drew 7. Mulligan or keep!`, { kind: 'turn' });
       break;
     }
 
@@ -733,6 +1380,13 @@ function applyAction(game, actor, a) {
         if (c) moveCard(game, actor, { cardId: id, to: 'battlefield', playerId: c.owner }, { quiet: true });
       }
       game.players.splice(game.players.indexOf(p), 1);
+      game.order = game.order.filter((x) => x !== p.id);
+      game.requests = game.requests.filter((r) => r.from !== p.id && r.to !== p.id);
+      for (const d of Object.values(game.dice)) if (d.owner === p.id) delete game.dice[d.id];
+      if (game.setup) {
+        game.setup.rollers = game.setup.rollers.filter((x) => x !== p.id);
+        game.setup.eligible = game.setup.eligible.filter((x) => x !== p.id);
+      }
       if (game.turn.active === p.id) game.turn.active = game.players[0] ? game.players[0].id : null;
       addLog(game, `${actor.name} removed ${p.name} from the game.`);
       break;
@@ -746,7 +1400,7 @@ function applyAction(game, actor, a) {
 
 /* ---------------------------------------------------------------- views */
 
-function cardView(c, viewerId, forceVisible = false) {
+function cardView(c, viewerId, forceVisible = false, stats = null) {
   const base = {
     id: c.id,
     owner: c.owner,
@@ -759,6 +1413,7 @@ function cardView(c, viewerId, forceVisible = false) {
     isToken: c.isToken,
     faceDown: c.faceDown,
     note: c.note,
+    attachedTo: c.attachedTo || null,
   };
   const hidden = !forceVisible && c.faceDown && c.owner !== viewerId && c.zp !== viewerId;
   if (hidden) return { ...base, hidden: true };
@@ -771,6 +1426,14 @@ function cardView(c, viewerId, forceVisible = false) {
     flipped: c.flipped,
     typeLine: c.typeLine,
     pt: c.pt,
+    backPt: c.backPt,
+    backTypeLine: c.backTypeLine,
+    manaCost: c.manaCost,
+    oracle: c.oracle,
+    backOracle: c.backOracle,
+    effects: c.effects,
+    ptMod: c.ptMod,
+    stats: stats ? stats[c.id] || null : null,
     scryfallUri: c.scryfallUri,
     scryfallId: c.scryfallId,
     set: c.set,
@@ -783,9 +1446,10 @@ function cardView(c, viewerId, forceVisible = false) {
 
 function viewFor(game, viewerId, connectedIds = new Set()) {
   const cards = {};
+  const stats = computeStats(game);
   const add = (id) => {
     const c = game.cards[id];
-    if (c) cards[id] = cardView(c, viewerId);
+    if (c) cards[id] = cardView(c, viewerId, false, stats);
   };
   const players = game.players.map((p) => {
     const zones = {};
@@ -811,6 +1475,7 @@ function viewFor(game, viewerId, connectedIds = new Set()) {
       revealTop: p.revealTop,
       handRevealed: p.handRevealed,
       deckName: p.deckName,
+      bfColor: p.bfColor || null,
       handCount: p.zones.hand.length,
       libraryCount: p.zones.library.length,
       topCard,
@@ -831,6 +1496,13 @@ function viewFor(game, viewerId, connectedIds = new Set()) {
     version: game.version,
     settings: game.settings,
     turn: game.turn,
+    order: turnOrder(game),
+    setup: game.setup,
+    dice: game.dice,
+    requests: game.requests
+      .filter((r) => r.from === viewerId || r.to === viewerId)
+      .map((r) => ({ id: r.id, from: r.from, to: r.to, text: r.text, t: r.t, type: r.action.type })),
+    tray: { w: TRAY_W, h: TRAY_H },
     phases: PHASES,
     you: viewerId,
     players,
@@ -865,6 +1537,13 @@ const api = {
   MAX_PLAYERS,
   rid,
   makeCode,
+  simulateDie,
+  describeEffect,
+  cleanEffects,
+  computeStats,
+  needsPermission,
+  createRequest,
+  UNDO_BARRIERS,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.MTGEngine = api;

@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>MTG Tabletop</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="css/style.css" />
@@ -66,17 +68,23 @@
       </div>
       <div id="status" class="status"></div>
       <div class="spacer"></div>
+      <button class="btn" id="btn-undo" title="Undo the last action">↶ Undo</button>
+      <button class="btn" id="btn-grid" title="Switch between one opponent at a time and all battlefields">All battlefields</button>
       <button class="btn" id="btn-deck">Load deck</button>
-      <button class="btn" id="btn-start">Start / restart game</button>
-      <button class="btn ghost" id="btn-settings" title="Settings">Settings</button>
-      <button class="btn ghost" id="btn-help" title="Help &amp; shortcuts">Help</button>
+      <button class="btn" id="btn-start">Start game</button>
+      <button class="btn ghost" id="btn-settings">Settings</button>
+      <button class="btn ghost" id="btn-help">Help</button>
       <button class="btn ghost" id="btn-log" title="Show / hide the log and chat">Log</button>
     </header>
 
-    <main class="table">
+    <main class="table" id="table">
       <section id="opponents" class="opponents"></section>
+      <section id="grid" class="grid" hidden>
+        <div class="cell" data-slot="1"></div><div class="cell" data-slot="2"></div>
+        <div class="cell" data-slot="0"></div><div class="cell" data-slot="3"></div>
+      </section>
 
-      <section class="centerbar">
+      <section class="centerbar" id="centerbar">
         <div class="turninfo">
           <div id="turn-label" class="turn-label"></div>
           <div id="phases" class="phases"></div>
@@ -88,14 +96,15 @@
         </div>
         <div class="tools">
           <button class="btn small" id="btn-token">+ Token</button>
-          <button class="btn small" id="btn-dice">Dice</button>
+          <button class="btn small" id="btn-d20">d20</button>
+          <button class="btn small" id="btn-prolif">Proliferate</button>
         </div>
       </section>
 
       <section id="me-area" class="me-area"></section>
     </main>
 
-    <footer class="handbar">
+    <footer class="handbar" id="handbar">
       <div class="piles" id="piles"></div>
       <div class="hand" id="hand" data-drop="hand"></div>
     </footer>
@@ -106,9 +115,16 @@
         <input id="chat-input" maxlength="300" placeholder="Chat… (Enter)" autocomplete="off" />
       </form>
     </aside>
+    <div id="park" hidden></div>
   </div>
 
+  <!-- phone layout (built by js/phone.js) -->
+  <div id="phone" class="phone" hidden></div>
+  <div id="rotate" class="rotate" hidden><div>↻</div><p>Turn your phone sideways to play.</p></div>
+
   <!-- floating UI -->
+  <div id="banners" class="banners"></div>
+  <div id="setup" class="setup" hidden></div>
   <div id="preview" class="preview" hidden></div>
   <div id="menu" class="menu" hidden></div>
   <div id="viewer" class="viewer" hidden></div>
@@ -119,5 +135,6 @@
   <script src="js/importer.js"></script>
   <script src="js/net.js"></script>
   <script src="js/ui.js"></script>
+  <script src="js/phone.js"></script>
 </body>
 </html>

@@ -62,8 +62,10 @@
         .filter((g) => g && g.id)
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
     },
-    getSeat: (code) => Store.get(SEAT_KEY + code),
-    setSeat: (code, seat) => Store.set(SEAT_KEY + code, seat),
+    // one seat per game code + player name, so two tabs in one browser can be different players
+    seatKey: (code, name) => `${SEAT_KEY}${code}${name ? `.${String(name).toLowerCase()}` : ''}`,
+    getSeat: (code, name) => Store.get(Store.seatKey(code, name)) || (name ? null : Store.get(SEAT_KEY + code)),
+    setSeat: (code, name, seat) => Store.set(Store.seatKey(code, name), seat),
   };
 
   const peerIdFor = (code) => PEER_PREFIX + String(code).toLowerCase();
@@ -86,11 +88,21 @@
 
   /* ---------------------------------------------------------------- host */
 
+  const UNDO_LABEL = {
+    move: 'moving a card', position: 'moving a card', tap: 'tapping', untapAll: 'untapping', draw: 'drawing', mill: 'milling', exileTop: 'exiling',
+    life: 'a life change', setLife: 'a life change', playerCounter: 'a counter change', cmdDamage: 'commander damage', cardCounter: 'a counter change',
+    flip: 'transforming', faceDown: 'turning a card face down', note: 'a note', createToken: 'making tokens', clone: 'copying a card',
+    setPtMod: 'a P/T bonus', setEffects: 'an effect change', attach: 'attaching', unattach: 'unattaching', proliferate: 'proliferating',
+    moveZone: 'moving cards', passTurn: 'passing the turn', setPhase: 'changing phase', keep: 'keeping a hand', loadDeck: 'loading a deck',
+  };
+
   class HostSession {
-    constructor(game, { onState, onStatus }) {
+    constructor(game, { onState, onStatus, onMessage }) {
       this.game = game;
       this.onState = onState;
       this.onStatus = onStatus;
+      this.onMessage = onMessage || (() => {});
+      this.history = []; // undo snapshots (kept in memory only)
       this.conns = new Set();
       this.saveTimer = null;
       this.retryTimer = null;
@@ -197,16 +209,74 @@
     }
 
     apply(player, action) {
-      if (action && action.type === 'removePlayer' && player.id !== this.game.hostPlayerId) return { error: 'Only the host can remove players.' };
+      if (!action || typeof action !== 'object') return { error: 'Bad action.' };
+      if (action.type === 'removePlayer' && player.id !== this.game.hostPlayerId) return { error: 'Only the host can remove players.' };
+      if (action.type === 'undo') return this.requestUndo(player);
+      const snap = JSON.stringify(this.game);
       try {
         const r = E.applyAction(this.game, player, action) || {};
+        if (r.undoApproved) {
+          this.changed();
+          return this.doUndo(r.requesterId);
+        }
+        const type = r.appliedType || action.type;
+        const by = r.appliedBy || player.id;
+        const recordable = !r.noChange && !r.pendingRequest && !r.denied && !['chat', 'cancelRequest', 'viewZone', 'closeSetup', 'setColor'].includes(type) && !(action.type === 'respond' && !r.appliedType);
+        if (recordable) {
+          this.history.push(E.UNDO_BARRIERS.has(type) ? { barrier: true, actorId: by, type } : { snap, actorId: by, type });
+          if (this.history.length > 40) this.history.shift();
+        }
         if (!r.noChange) this.changed();
-        return { ok: true, private: r.private || null };
+        if (r.privateFor && r.private) this.deliver(r.privateFor, { type: 'private', private: r.private });
+        if (r.notify) this.deliver(r.notify.to, { type: 'notify', text: r.notify.text });
+        if (r.effectsSaved) this.deliver(r.effectsSaved.owner, { type: 'effects', ...r.effectsSaved });
+        return {
+          ok: true,
+          private: r.privateFor ? null : r.private || null,
+          pending: r.pendingRequest ? { id: r.pendingRequest, waitingFor: r.waitingFor } : null,
+        };
       } catch (e) {
         if (e instanceof E.GameError) return { error: e.message };
         console.error(e);
         return { error: 'Something went wrong: ' + e.message };
       }
+    }
+
+    /** Send a one-off message to one player (host included). */
+    deliver(playerId, msg) {
+      if (playerId === this.game.hostPlayerId) return this.onMessage(msg);
+      for (const c of this.conns) if (c.playerId === playerId && c.open) try { c.send(msg); } catch { /* ignore */ }
+    }
+
+    requestUndo(player) {
+      const top = this.history[this.history.length - 1];
+      if (!top) return { error: 'Nothing to undo.' };
+      if (top.barrier) return { error: "Can't undo past a shuffle, mulligan or dice roll." };
+      const owner = this.game.players.find((p) => p.id === top.actorId);
+      if (owner && owner.id !== player.id) {
+        try {
+          const r = E.createRequest(this.game, player, owner.id, { type: 'undo' });
+          this.changed();
+          return { ok: true, pending: { id: r.pendingRequest, waitingFor: r.waitingFor } };
+        } catch (e) {
+          return { error: e.message };
+        }
+      }
+      return this.doUndo(player.id);
+    }
+
+    doUndo(byId) {
+      const top = this.history[this.history.length - 1];
+      if (!top || top.barrier) return { error: 'Nothing to undo.' };
+      this.history.pop();
+      const restored = JSON.parse(top.snap);
+      restored.requests = [];
+      restored.version = this.game.version;
+      const by = restored.players.find((p) => p.id === byId) || this.game.players.find((p) => p.id === byId);
+      restored.log.push({ id: restored.nextLogId++, t: Date.now(), kind: 'warn', text: `${by ? by.name : 'Someone'} undid ${UNDO_LABEL[top.type] || top.type}.` });
+      this.game = restored;
+      this.changed();
+      return { ok: true };
     }
 
     /** Actions made by the host themself. */
@@ -264,7 +334,8 @@
   /* --------------------------------------------------------------- guest */
 
   class GuestSession {
-    constructor(code, name, { onState, onStatus, onNeedName, onJoinError }) {
+    constructor(code, name, { onState, onStatus, onNeedName, onJoinError, onMessage }) {
+      this.onMessage = onMessage || (() => {});
       this.code = String(code).toUpperCase();
       this.name = name;
       this.onState = onState;
@@ -276,7 +347,7 @@
       this.conn = null;
       this.destroyed = false;
       this.isHost = false;
-      this.playerId = (Store.getSeat(this.code) || {}).playerId || null;
+      this.playerId = (Store.getSeat(this.code, name) || {}).playerId || null;
     }
 
     start() {
@@ -343,7 +414,7 @@
       this.conn = conn;
       conn.on('open', () => {
         this.lastSeen = Date.now();
-        const seat = Store.getSeat(this.code) || {};
+        const seat = Store.getSeat(this.code, this.name) || {};
         conn.send({ type: 'hello', token: seat.token || null, name: this.name || seat.name || null });
       });
       conn.on('data', (msg) => this.handle(msg));
@@ -366,7 +437,8 @@
           break;
         case 'welcome':
           this.playerId = msg.playerId;
-          Store.setSeat(this.code, { token: msg.token, name: msg.name, playerId: msg.playerId, gameName: msg.gameName, joinedAt: Date.now() });
+          this.name = msg.name;
+          Store.setSeat(this.code, msg.name, { token: msg.token, name: msg.name, playerId: msg.playerId, gameName: msg.gameName, joinedAt: Date.now() });
           this.onStatus({ level: 'good', text: 'Connected to host' });
           break;
         case 'need-name':
@@ -377,6 +449,11 @@
           break;
         case 'state':
           this.onState(msg.view);
+          break;
+        case 'private':
+        case 'notify':
+        case 'effects':
+          this.onMessage(msg);
           break;
         case 'result': {
           const p = this.pending.get(msg.reqId);
