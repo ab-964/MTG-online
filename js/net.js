@@ -98,7 +98,7 @@
 
   class HostSession {
     constructor(game, { onState, onStatus, onMessage }) {
-      this.game = game;
+      this.game = E.upgradeGame(game);
       this.onState = onState;
       this.onStatus = onStatus;
       this.onMessage = onMessage || (() => {});

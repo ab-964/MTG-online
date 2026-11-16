@@ -1525,7 +1525,41 @@ function summary(game) {
   };
 }
 
+/** Bring a game saved by an older version up to date (adds any missing fields). */
+function upgradeGame(g) {
+  if (!g || typeof g !== 'object') return g;
+  g.settings = { startingLife: g.format === 'standard' ? 20 : 40, autoUntap: true, autoDraw: true, ...(g.settings || {}) };
+  if (!Array.isArray(g.order)) g.order = [];
+  if (g.setup === undefined) g.setup = null;
+  if (!g.dice || typeof g.dice !== 'object') g.dice = {};
+  if (!Array.isArray(g.requests)) g.requests = [];
+  if (!Array.isArray(g.stack)) g.stack = [];
+  if (!Array.isArray(g.log)) g.log = [];
+  if (!g.nextSeq) g.nextSeq = 1;
+  if (!g.nextLogId) g.nextLogId = (g.log.length ? g.log[g.log.length - 1].id : 0) + 1;
+  if (!g.turn) g.turn = { active: null, number: 1, phase: 0 };
+  if (!g.cards) g.cards = {};
+  for (const p of g.players || []) {
+    if (p.bfColor === undefined) p.bfColor = null;
+    if (!p.counters) p.counters = {};
+    if (!p.cmdDamage) p.cmdDamage = {};
+    if (!p.zones) p.zones = {};
+    for (const z of PLAYER_ZONES) if (!Array.isArray(p.zones[z])) p.zones[z] = [];
+    if (p.deck && Array.isArray(p.deck.cards)) p.deck.cards = p.deck.cards.map((t) => cleanTemplate(t)).filter(Boolean);
+  }
+  for (const c of Object.values(g.cards)) {
+    if (!c.counters) c.counters = {};
+    if (!Array.isArray(c.effects)) c.effects = [];
+    if (!c.ptMod) c.ptMod = { p: 0, t: 0 };
+    if (c.attachedTo === undefined) c.attachedTo = null;
+    for (const k of ['oracle', 'backOracle', 'manaCost', 'backTypeLine', 'typeLine', 'note']) if (typeof c[k] !== 'string') c[k] = '';
+    if (!Array.isArray(c.tokens)) c.tokens = [];
+  }
+  return g;
+}
+
 const api = {
+  upgradeGame,
   createGame,
   joinGame,
   applyAction,
