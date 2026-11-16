@@ -23,6 +23,7 @@
   const { $, $$, esc, clamp } = U;
 
   let built = false;
+  let lastCombat = false;
   let view = 'bf'; // 'bf' | 'zones' | 'grid' | 'watch' | 'log'
   let watchPid = null;
   const bfs = {}; // pid -> phone battlefield element
@@ -51,6 +52,7 @@
             <div class="pside" id="p-watch-side"></div>
           </div>
         </div>
+        <div class="pview" data-view="combat" hidden><div class="pcombat" id="p-combat"></div></div>
         <div class="pview" data-view="log" hidden>
           <div class="plogview"><div class="log" id="p-log"></div>
             <form id="p-chat" class="chat-form"><input maxlength="300" placeholder="Chat…" autocomplete="off"></form></div>
@@ -58,7 +60,9 @@
         <div class="pstack" id="p-stack" hidden></div>
         <button class="pback" id="p-back" hidden>◀ My battlefield</button>
         <div class="pstatus status status-pill" id="p-status"></div>
+        <div class="pnav" id="p-nav"></div>
       </div>
+      <div class="pedges" id="p-edges" hidden></div>
       <div class="phand" id="p-hand"></div>`;
     if (U.status) {
       const st = $('#p-status');
@@ -91,6 +95,12 @@
     $('#p-watch-side').addEventListener('click', (e) => {
       const b = e.target.closest('[data-zone]');
       if (b) U.openViewer(watchPid, b.dataset.zone);
+    });
+    $('#p-combat').addEventListener('click', onCombatTap);
+    $('#p-nav').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-nav]');
+      const t = $('#p-nav')._t || {};
+      if (b && t[b.dataset.nav]) t[b.dataset.nav].go();
     });
     $('#p-stack').addEventListener('click', (e) => {
       const el = e.target.closest('[data-id]');
@@ -125,6 +135,7 @@
   }
 
   function setView(v) {
+    if (!U.S) return;
     view = v;
     U.hideMenu();
     render(U.S);
@@ -138,6 +149,7 @@
 
   function render(S) {
     if (!U.phone || !built || !S) return;
+    if (view === 'combat' && !S.combat) view = 'bf';
     const me = U.me();
     const active = U.playerById(S.turn.active);
     $('#p-turn').textContent = active ? (active.id === S.you ? 'Your turn' : `${active.name}'s turn`) : 'Setting up';
@@ -163,6 +175,11 @@
       };
       $('#p-watch-side').innerHTML = pile('graveyard', 'Grave', z.graveyard) + pile('exile', 'Exile', z.exile) + (z.command.length ? pile('command', 'Cmd', z.command) : '');
     }
+    if (view === 'combat') renderPhoneCombat(S);
+    renderNav(S);
+    if (S.combat && !lastCombat && (S.combat.attacker === S.you || S.combat.participants.includes(S.you) || S.combat.attacker !== S.you))
+      U.toast(S.combat.attacker === S.you ? 'Combat! Tap ↑ for the combat zone, or drag creatures to the top of the screen.' : `${(U.playerById(S.combat.attacker) || {}).name || 'Someone'} is attacking! Tap ↑ to see the combat zone.`);
+    lastCombat = !!S.combat;
     if (view === 'zones') renderZones(S, me);
     if (view === 'grid') renderGrid(S);
     if (view === 'log') U.renderLog($('#p-log'));
@@ -190,11 +207,10 @@
       bf.className = 'bf pbf';
       bf.dataset.pid = p.id;
       bf.innerHTML = `<div class="bf-table" data-drop="bf" data-player="${p.id}" style="width:${U.S.table.w}px;height:${U.S.table.h}px">
-          <div class="zone-hint" style="top:82px">CREATURES</div><div class="zone-hint" style="top:332px">OTHER PERMANENTS</div><div class="zone-hint" style="top:582px">LANDS</div>
           <div class="layer"></div></div>
         <button class="plife" data-pid="${p.id}"></button>`;
       bfs[p.id] = bf;
-      U.views[p.id] = U.views[p.id] || { x: 0, y: 0, z: 0.4, auto: true };
+      U.views[p.id] = U.views[p.id] || { x: 0, y: 0, z: U.DEFAULT_Z * 0.75, auto: true };
       setupBfGestures(bf, p.id);
       new ResizeObserver(() => {
         if (U.views[p.id].auto) fitPhone(p.id);
@@ -214,6 +230,7 @@
     U.reconcile(bf.querySelector('.layer'), ids.concat(dice.map((d) => `die:${d.id}`)), (id, el) =>
       id.startsWith('die:') ? U.dieEl(U.S.dice[id.slice(4)], el, p.id) : U.cardEl(U.S.cards[id], el, 'bf', pos[id]),
     );
+    if (U.views[p.id] && U.views[p.id].auto && bf.offsetParent) fitPhone(p.id);
   }
 
   function applyPhoneView(pid) {
@@ -222,15 +239,20 @@
     if (bf && v) bf.querySelector('.bf-table').style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.z})`;
   }
 
-  /** Fit the whole battlefield on screen; pinch (or the menu) to zoom in. */
-  function fitPhone(pid) {
+  /** Fit every card with a border around them (soft = never zoom in past normal card size). */
+  function fitPhone(pid, soft = true) {
     const bf = bfs[pid];
     if (!bf || !U.S || !bf.offsetParent) return;
+    U.fitView(pid, soft);
+  }
+
+  /** Middle of what you're looking at, in table units (new cards land here). */
+  function viewCenter(pid) {
+    const bf = bfs[pid];
+    const v = U.views[pid];
+    if (!bf || !v || !bf.offsetParent) return null;
     const r = bf.getBoundingClientRect();
-    if (!r.width || !r.height) return;
-    const z = Math.min(r.width / U.S.table.w, r.height / U.S.table.h);
-    U.views[pid] = { z, x: (r.width - U.S.table.w * z) / 2, y: (r.height - U.S.table.h * z) / 2, auto: true };
-    applyPhoneView(pid);
+    return { x: Math.round((r.width / 2 - v.x) / v.z), y: Math.round((r.height / 2 - v.y) / v.z) };
   }
 
   function zoomPhone(pid, factor, cx, cy) {
@@ -358,6 +380,7 @@
     g.gw = parseFloat(ghost.style.width);
     g.gh = parseFloat(ghost.style.height);
     el.classList.add('dragging-src');
+    showEdges('perm', g.card);
     moveCardDrag(g, e);
   }
 
@@ -366,16 +389,20 @@
     g.ghostEl.style.top = `${e.clientY - g.gh / 2}px`;
     g.lx = e.clientX;
     g.ly = e.clientY;
+    highlightEdge(e.clientX, e.clientY);
   }
 
   function restoreCard(g) {
+    hideEdges();
     if (g.ghostEl) g.ghostEl.remove();
     if (g.cardEl) g.cardEl.classList.remove('dragging-src', 'held');
   }
 
   async function endCardDrag(g, e, pid) {
-    restoreCard(g);
+    if (g.ghostEl) g.ghostEl.remove();
+    if (g.cardEl) g.cardEl.classList.remove('dragging-src', 'held');
     const c = g.card;
+    if (dropOnEdge(c, e.clientX, e.clientY)) return;
     const under = document.elementFromPoint(e.clientX, e.clientY);
     if (under && under.closest('#p-hand')) return U.act({ type: 'move', cardId: c.id, to: 'hand' });
     const bfEl = under && under.closest('.pbf');
@@ -430,6 +457,193 @@
     );
   }
 
+  /* ------------------------------------------------------ combat map */
+
+  // The map during combat:   [opponent battlefields]
+  //                          [combat with each opponent]  (← →)
+  //                          [            me            ]
+  function navTargets(S) {
+    const cb = S.combat;
+    if (!cb) return {};
+    const iAttack = cb.attacker === S.you;
+    const def = U.currentCombatDef();
+    const other = iAttack ? def : cb.attacker;
+    const name = (id) => (U.playerById(id) || {}).name || '?';
+    const t = {};
+    if (view === 'bf' || view === 'zones') t.up = { label: '⚔ Combat', go: () => setView('combat') };
+    if (view === 'combat') {
+      t.down = { label: 'Me', go: () => setView('bf') };
+      t.up = { label: `${name(other)}'s battlefield`, go: () => { watchPid = other; setView('watch'); } };
+      if (iAttack && U.combatDefenders().length > 1) {
+        t.left = { label: '◀', go: () => U.switchCombatDef(-1) };
+        t.right = { label: '▶', go: () => U.switchCombatDef(1) };
+      }
+    }
+    if (view === 'watch') {
+      t.down = {
+        label: '⚔ Combat',
+        go: () => {
+          if (iAttack && U.combatDefenders().includes(watchPid)) U.setCombatDef(watchPid);
+          setView('combat');
+        },
+      };
+    }
+    return t;
+  }
+
+  function renderNav(S) {
+    const nav = $('#p-nav');
+    const t = navTargets(S);
+    nav.innerHTML = ['up', 'down', 'left', 'right']
+      .filter((k) => t[k])
+      .map((k) => `<button class="pnav-btn ${k}" data-nav="${k}">${k === 'up' ? '▲ ' : k === 'down' ? '▼ ' : ''}${esc(t[k].label)}</button>`)
+      .join('');
+    nav._t = t;
+  }
+
+  function renderPhoneCombat(S) {
+    const box = $('#p-combat');
+    const cb = S.combat;
+    const def = U.currentCombatDef();
+    const defP = U.playerById(def);
+    const attP = U.playerById(cb.attacker);
+    const iAttack = cb.attacker === S.you;
+    const targets = [{ kind: 'player', id: def }];
+    for (const id of defP ? defP.zones.battlefield : []) {
+      const c = S.cards[id];
+      if (c && /\b(Planeswalker|Battle)\b/.test(c.typeLine || '')) targets.push({ kind: 'pw', id });
+    }
+    const atFor = (t) => cb.attacks.filter((a) => a.target.kind === t.kind && a.target.id === t.id);
+    const total = (list) => list.reduce((s, a) => s + (a.dmg || 0), 0);
+    const inIt = cb.participants.includes(S.you);
+    box.innerHTML = `<div class="cb-head">
+        <b>⚔ ${esc(iAttack ? 'You' : attP ? attP.name : '?')} → ${esc(def === S.you ? 'you' : defP ? defP.name : '?')}</b>
+        <span class="cb-total">Total <b>${total(atFor(targets[0]))}</b></span><span class="spacer"></span>
+        <span class="cb-ready">${cb.participants.map((id) => `<span class="cb-chip ${cb.done[id] ? 'ok' : ''}">${esc(id === S.you ? 'You' : (U.playerById(id) || {}).name || '?')} ${cb.done[id] ? '✓' : '…'}</span>`).join('')}</span>
+        ${inIt ? `<button class="btn small ${cb.done[S.you] ? '' : 'primary'}" data-cb="done">${cb.done[S.you] ? 'Not done' : 'Done ✓'}</button>` : ''}
+      </div>
+      <div class="cb-body">${targets
+        .map((t) => {
+          const list = atFor(t);
+          const c = t.kind === 'pw' ? S.cards[t.id] : null;
+          const label = c ? `${esc(c.name)} <span class="loyal-inline">${(c.counters || {}).loyalty != null ? c.counters.loyalty : esc(c.loyalty || '?')}</span> · <b>${total(list)}</b>` : `♥ ${defP ? defP.life : '?'}`;
+          return `<div class="cb-target ${t.kind}" data-tkind="${t.kind}" data-tid="${t.id}">
+            <div class="cb-tlabel">${label}${iAttack ? ' <span class="muted small">(tap to add attackers)</span>' : ''}</div>
+            <div class="cb-cols">${list.map((a) => U.combatColumnHTML(a, cb)).join('') || `<div class="cb-empty muted small">${iAttack ? 'Tap here, or drag creatures to the top of your battlefield' : 'No attackers'}</div>`}</div></div>`;
+        })
+        .join('')}</div>`;
+  }
+
+  /** Taps in the phone combat zone. */
+  function onCombatTap(e) {
+    const S = U.S;
+    const cb = S && S.combat;
+    if (!cb) return;
+    if (e.target.closest('[data-cb]')) return U.combatClick(e);
+    const me = S.you;
+    const col = e.target.closest('.cb-col');
+    const target = e.target.closest('.cb-target');
+    const cardEl = e.target.closest('.card[data-id]');
+    const myCreatures = (filter) =>
+      U.me()
+        .zones.battlefield.map((id) => S.cards[id])
+        .filter((c) => c && /\bCreature\b/.test(c.typeLine || '') && filter(c));
+    const attacking = new Set(cb.attacks.map((a) => a.cardId));
+    const blocking = new Set(cb.attacks.flatMap((a) => a.blockers));
+    if (cardEl && col && cb.attacker === me) {
+      const at = cb.attacks.find((a) => a.id === col.dataset.attack);
+      if (at && at.cardId === cardEl.dataset.id) {
+        const defP = U.playerById(U.currentCombatDef());
+        const items = [{ header: S.cards[at.cardId].name }, { label: `Attack ${defP ? defP.name : 'player'}`, fn: () => U.act({ type: 'declareAttack', cardId: at.cardId, target: { kind: 'player', id: defP.id } }) }];
+        for (const t of $$('#p-combat .cb-target.pw')) items.push({ label: `Attack ${S.cards[t.dataset.tid].name}`, fn: () => U.act({ type: 'declareAttack', cardId: at.cardId, target: { kind: 'pw', id: t.dataset.tid } }) });
+        items.push({ label: 'Remove from combat', cls: 'stop', fn: () => U.act({ type: 'removeAttack', attackId: at.id }) });
+        return U.showMenu(items, 0, 0, {});
+      }
+    }
+    if (col) {
+      const at = cb.attacks.find((a) => a.id === col.dataset.attack);
+      if (at && at.defender === me) {
+        const list = myCreatures((c) => !c.tapped && !blocking.has(c.id));
+        return U.showMenu(
+          [{ header: `Block ${S.cards[at.cardId].name} with…` }].concat(list.length ? list.map((c) => ({ label: c.name, fn: () => U.act({ type: 'block', attackId: at.id, cardId: c.id }) })) : [{ label: 'No untapped creatures', disabled: true, fn() {} }]),
+          0,
+          0,
+          {},
+        );
+      }
+    }
+    if (target && cb.attacker === me) {
+      const list = myCreatures((c) => !c.tapped && !attacking.has(c.id));
+      const t = { kind: target.dataset.tkind, id: target.dataset.tid };
+      return U.showMenu(
+        [{ header: 'Attack with…' }].concat(list.length ? list.map((c) => ({ label: c.name, fn: () => U.act({ type: 'declareAttack', cardId: c.id, target: t }) })) : [{ label: 'No untapped creatures', disabled: true, fn() {} }]),
+        0,
+        0,
+        {},
+      );
+    }
+  }
+
+  /* --------------------------------------------- edge targets while dragging */
+
+  function showEdges(kind, card) {
+    const S = U.S;
+    const edges = $('#p-edges');
+    const left = [['graveyard', 'Graveyard'], ['exile', 'Exile']];
+    const right = [];
+    if (kind === 'perm') right.push(['hand', 'Hand']);
+    right.push(['library', 'Library (top)']);
+    if (S.format === 'commander' || card.isCommander) right.push(['command', 'Command']);
+    let top = [];
+    const cb = S.combat;
+    if (kind === 'perm' && cb && card.zp === S.you && /\bCreature\b/.test(card.typeLine || '')) {
+      if (cb.attacker === S.you) top = U.combatDefenders().map((id) => [`attack:${id}`, `⚔ Attack ${(U.playerById(id) || {}).name || '?'}`]);
+      else if (cb.attacks.some((a) => a.defender === S.you)) top = [['block', '🛡 Block…']];
+    }
+    const zone = (list, cls) => `<div class="pedge ${cls}">${list.map(([k, l]) => `<div class="pedge-t" data-edge="${k}">${esc(l)}</div>`).join('')}</div>`;
+    edges.innerHTML = zone(left, 'left') + zone(right, 'right') + (top.length ? zone(top, 'top') : '');
+    edges.hidden = false;
+  }
+
+  function hideEdges() {
+    $('#p-edges').hidden = true;
+  }
+
+  function edgeAt(x, y) {
+    const el = document.elementFromPoint(x, y);
+    return el ? el.closest('[data-edge]') : null;
+  }
+
+  function highlightEdge(x, y) {
+    const t = edgeAt(x, y);
+    for (const el of $$('#p-edges .pedge-t')) el.classList.toggle('hot', el === t);
+    return t;
+  }
+
+  /** Returns true if the card was dropped on an edge target. */
+  function dropOnEdge(card, x, y) {
+    const t = edgeAt(x, y);
+    hideEdges();
+    if (!t) return false;
+    const k = t.dataset.edge;
+    const S = U.S;
+    if (k.startsWith('attack:')) U.act({ type: 'declareAttack', cardId: card.id, target: { kind: 'player', id: k.slice(7) } });
+    else if (k === 'block') {
+      const list = S.combat.attacks.filter((a) => a.defender === S.you);
+      if (list.length === 1) U.act({ type: 'block', attackId: list[0].id, cardId: card.id });
+      else
+        U.showMenu(
+          [{ header: `Block which attacker with ${card.name}?` }].concat(
+            list.map((a) => ({ label: `${S.cards[a.cardId].name} (${a.dmg == null ? '?' : a.dmg} dmg)`, fn: () => U.act({ type: 'block', attackId: a.id, cardId: card.id }) })),
+          ),
+          0,
+          0,
+          {},
+        );
+    } else U.act({ type: 'move', cardId: card.id, to: k, pos: 'top' });
+    return true;
+  }
+
   /* ---------------------------------------------------------- sheets */
 
   function cardHead(c) {
@@ -446,6 +660,7 @@
   }
 
   function lifeSheet(pid) {
+    if (!U.S) return;
     const p = U.playerById(pid);
     if (!p) return;
     const items = [
@@ -476,6 +691,7 @@
 
   function openMainMenu() {
     const S = U.S;
+    if (!S) return U.toast('Still loading the game… one moment.');
     const pid = view === 'watch' ? watchPid : S.you;
     const others = U.seatOrder().filter((id) => id !== S.you);
     U.showMenu(
@@ -491,7 +707,7 @@
         { sep: true },
         { label: '＋ Zoom in', fn: () => zoomPhone(pid, 1.3) },
         { label: '－ Zoom out', fn: () => zoomPhone(pid, 0.77) },
-        { label: '⤢ Fit battlefield', fn: () => fitPhone(pid) },
+        { label: '⤢ Fit battlefield', fn: () => fitPhone(pid, false) },
         { sep: true },
         { label: '🎲 Drop a d20 on my battlefield', fn: () => { setView('bf'); U.act({ type: 'placeDie' }); } },
         { label: '✦ Create token…', fn: () => U.tokenDialog(S.you) },
@@ -537,7 +753,7 @@
     const zEl = e.target.closest('[data-zone]');
     if (!zEl) return;
     const zone = zEl.dataset.zone;
-    if (zone === 'library') return U.showMenu(U.libraryMenu(), 0, 0, {});
+    if (zone === 'library') return U.libraryClick(e.clientX, e.clientY);
     if (zone === 'command') {
       const me = U.me();
       if (me.zones.command.length === 1) return cardSheet(U.S.cards[me.zones.command[0]], 'command');
@@ -663,14 +879,16 @@
       cur.el.classList.remove('held', 'dragging-src');
       if (cur.ghost) cur.ghost.remove();
       $('#p-hand').classList.remove('sorting');
+      if (cur.kind !== 'play') hideEdges();
       const c = U.getCard(cur.id);
-      if (!c || e.type === 'touchcancel') return;
+      if (!c || e.type === 'touchcancel') return hideEdges();
       const touch = e.changedTouches[0];
       if (cur.kind === 'maybe' || cur.kind === 'held') {
         if (e.cancelable) e.preventDefault(); // no extra mouse click afterwards
         return handSheet(c);
       }
       if (cur.kind === 'play') {
+        if (dropOnEdge(c, touch.clientX, touch.clientY)) return;
         const top = $('#p-hand').getBoundingClientRect().top;
         if (touch.clientY < top - 25) U.playFromHand(c, 'auto');
         return;
@@ -700,6 +918,7 @@
     t.ghost = g;
     t.el.classList.add('dragging-src');
     if (t.kind === 'sort') $('#p-hand').classList.add('sorting');
+    if (t.kind === 'play') showEdges('hand', c);
     moveHandGhost(t, touch);
   }
 
@@ -708,7 +927,8 @@
     t.ghost.style.top = `${touch.clientY - (t.kind === 'sort' ? 120 : 160)}px`;
     if (t.kind === 'play') {
       const top = $('#p-hand').getBoundingClientRect().top;
-      t.ghost.classList.toggle('will-play', touch.clientY < top - 25);
+      const onEdge = highlightEdge(touch.clientX, touch.clientY);
+      t.ghost.classList.toggle('will-play', !onEdge && touch.clientY < top - 25);
     }
   }
 
@@ -717,5 +937,5 @@
     U.showMenu(U.cardMenu(c, 'hand'), 0, 0, { head: cardHead(c) });
   }
 
-  window.MTGPhone = { init, setView, fitPhone };
+  window.MTGPhone = { init, setView, fitPhone, applyView: applyPhoneView, viewCenter };
 })();

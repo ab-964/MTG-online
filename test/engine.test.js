@@ -296,7 +296,7 @@ test('dice physics is deterministic and stays on the table', () => {
   const die = Object.values(g.dice)[0];
   E.applyAction(g, a, { type: 'rollDie', dieId: die.id, vx: 900, vy: 300 });
   assert.ok(die.value >= 1 && die.value <= 20);
-  const last = E.simulateDie(die.sx, die.sy, die.vx, die.vy, 1600, 700).pop();
+  const last = E.simulateDie(die.sx, die.sy, die.vx, die.vy, die.rw, die.rh, 70, die.rx, die.ry).pop();
   assert.deepEqual([die.x, die.y], [last[0], last[1]]);
 });
 
@@ -315,5 +315,166 @@ test('effect helper reads common card wordings', () => {
   assert.deepEqual(t('Dragonstorm Globe', 'Each Dragon you control enters with an additional +1/+1 counter on it.'), ['Dragon creatures you control enter with 1 extra +1/+1 counter']);
   assert.deepEqual(t('Bonesplitter', 'Equipped creature gets +2/+0.\nEquip {1}'), ['Equipped/enchanted creature gets +2/+0']);
   assert.deepEqual(t('Giant Growth', 'Target creature gets +3/+3 until end of turn.'), []);
-  assert.equal(I.suggestEffects({ name: 'Crusade', oracle: 'White creatures get +1/+1.' }).unhandled, true);
+  assert.equal(I.suggestEffects({ name: 'Brute', oracle: 'Attacking creatures you control get +1/+0.' }).unhandled, true);
+});
+
+/* ------------------------------------------------------------ v3 features */
+
+const D3 = { name: 'D3', cards: [
+  { name: 'Grizzly Bears', qty: 3, typeLine: 'Creature — Bear', pt: '2/2', cmc: 2, colors: ['G'] },
+  { name: 'Serra Angel', qty: 1, typeLine: 'Creature — Angel', pt: '4/4', cmc: 5, colors: ['W'], oracle: 'Flying, vigilance' },
+  { name: 'Boros Swiftblade', qty: 1, typeLine: 'Creature — Human Soldier', pt: '1/2', cmc: 2, colors: ['R', 'W'], oracle: 'Double strike' },
+  { name: 'Jace Beleren', qty: 1, typeLine: 'Legendary Planeswalker — Jace', loyalty: '3', cmc: 3, colors: ['U'] },
+  { name: 'Crusade', qty: 1, typeLine: 'Enchantment', cmc: 2, colors: ['W'], effects: [{ kind: 'pt', who: 'all', color: 'W', p: 1, t: 1 }] },
+  { name: 'Forest', qty: 20, typeLine: 'Basic Land — Forest', cmc: 0, colors: [] },
+] };
+function fresh3() {
+  const g = E.createGame({ name: 'T3' });
+  const a = E.joinGame(g, 'Abby').player;
+  const b = E.joinGame(g, 'Sam').player;
+  E.applyAction(g, a, { type: 'loadDeck', deck: D3 });
+  E.applyAction(g, b, { type: 'loadDeck', deck: D3 });
+  g.turn.active = a.id;
+  return { g, a, b };
+}
+const put = (g, p, name, hint) => {
+  const c = Object.values(g.cards).find((x) => x.owner === p.id && x.name === name && x.zone !== 'battlefield');
+  E.applyAction(g, p, { type: 'move', cardId: c.id, to: 'battlefield', hint });
+  return c;
+};
+
+test('cards land at the hint point without stacking', () => {
+  const { g, a } = fresh3();
+  const x = put(g, a, 'Grizzly Bears', { x: 1000, y: 800 });
+  const y = put(g, a, 'Grizzly Bears', { x: 1000, y: 800 });
+  assert.equal(x.x, 950);
+  assert.equal(x.y, 730);
+  assert.ok(Math.abs(x.x - y.x) >= 85 || Math.abs(x.y - y.y) >= 115);
+});
+
+test('setCounters writes one log line and nets +1/+1 with -1/-1', () => {
+  const { g, a } = fresh3();
+  const bear = put(g, a, 'Grizzly Bears');
+  const logs = g.log.length;
+  E.applyAction(g, a, { type: 'setCounters', cardId: bear.id, counters: { '+1/+1': 3, '-1/-1': 1, fire: 2 } });
+  assert.deepEqual(bear.counters, { '+1/+1': 2, fire: 2 });
+  assert.equal(g.log.length, logs + 1);
+  const r = E.applyAction(g, a, { type: 'setCounters', cardId: bear.id, counters: { '+1/+1': 2, fire: 2 } });
+  assert.ok(r.noChange);
+});
+
+test('planeswalkers enter with loyalty counters', () => {
+  const { g, a } = fresh3();
+  const jace = put(g, a, 'Jace Beleren');
+  assert.equal(jace.counters.loyalty, 3);
+});
+
+test('colour and mana value filters', () => {
+  const { g, a } = fresh3();
+  const angel = put(g, a, 'Serra Angel');
+  const bear = put(g, a, 'Grizzly Bears');
+  put(g, a, 'Crusade');
+  const st = E.computeStats(g);
+  assert.equal(st[angel.id].total, '5/5', 'white creature gets +1/+1');
+  assert.equal(st[bear.id].total, '2/2', 'green creature does not');
+  assert.equal(E.describeEffect({ kind: 'pt', who: 'yours', color: 'W', mvOp: '<=', mv: 3, p: 1, t: 1 }), 'White creatures you control with mana value 3 or less get +1/+1');
+});
+
+test('reveal until a creature', () => {
+  const { g, a } = fresh3();
+  a.zones.library.sort((x, y) => (g.cards[x].name === 'Serra Angel') - (g.cards[y].name === 'Serra Angel'));
+  const libBefore = a.zones.library.length;
+  E.applyAction(g, a, { type: 'revealUntil', typeWord: 'creature', mvOp: '>=', mv: 5 });
+  const rv = g.reveal;
+  assert.equal(g.cards[rv.found].name, 'Serra Angel');
+  E.applyAction(g, a, { type: 'resolveReveal', found: 'hand', rest: 'bottom' });
+  assert.equal(g.reveal, null);
+  assert.ok(a.zones.hand.includes(rv.found));
+  assert.equal(a.zones.library.length, libBefore - 1);
+});
+
+test('combat: attack, block, damage with double strike and modifiers, both press done', () => {
+  const { g, a, b } = fresh3();
+  const angel = put(g, a, 'Serra Angel');
+  const blade = put(g, a, 'Boros Swiftblade');
+  const jace = put(g, b, 'Jace Beleren');
+  const bear = put(g, b, 'Grizzly Bears');
+  E.applyAction(g, a, { type: 'setPhase', phase: 4 });
+  assert.ok(g.combat);
+  E.applyAction(g, a, { type: 'declareAttack', cardId: angel.id, target: { kind: 'player', id: b.id } });
+  E.applyAction(g, a, { type: 'declareAttack', cardId: blade.id, target: { kind: 'pw', id: jace.id } });
+  assert.equal(E.needsPermission(g, a, { type: 'declareAttack', cardId: angel.id }), null);
+  const atA = g.combat.attacks[0];
+  const atB = g.combat.attacks[1];
+  assert.throws(() => E.applyAction(g, a, { type: 'block', attackId: atA.id, cardId: angel.id }), E.GameError);
+  E.applyAction(g, b, { type: 'block', attackId: atA.id, cardId: bear.id });
+  assert.deepEqual(atA.blockers, [bear.id]);
+  let v = E.viewFor(g, a.id);
+  assert.equal(v.combat.attacks[0].dmg, 4);
+  assert.equal(v.combat.attacks[1].dmg, 2, 'double strike doubles 1 power');
+  E.applyAction(g, a, { type: 'combatMod', attackId: atB.id, op: '+', n: 2 });
+  E.applyAction(g, a, { type: 'combatMod', attackId: atB.id, op: 'x', n: 2 });
+  v = E.viewFor(g, a.id);
+  assert.equal(v.combat.attacks[1].dmg, 8, '(2 + 2) x 2');
+  E.applyAction(g, b, { type: 'combatMod', attackId: atB.id, op: 'move', index: 1, dir: 'left' });
+  v = E.viewFor(g, a.id);
+  assert.equal(v.combat.attacks[1].dmg, 6, 'defender re-orders: 2 x 2 + 2');
+  E.applyAction(g, a, { type: 'combatDone' });
+  assert.ok(g.combat, 'waits for the defender');
+  E.applyAction(g, b, { type: 'combatDone' });
+  assert.equal(g.combat, null);
+  assert.equal(angel.tapped, false, 'vigilance');
+  assert.equal(blade.tapped, true);
+});
+
+test('changing combat resets everyone\'s Done', () => {
+  const { g, a, b } = fresh3();
+  const bear = put(g, a, 'Grizzly Bears');
+  const theirs = put(g, b, 'Grizzly Bears');
+  E.applyAction(g, a, { type: 'combatStart' });
+  E.applyAction(g, a, { type: 'declareAttack', cardId: bear.id, target: { kind: 'player', id: b.id } });
+  E.applyAction(g, a, { type: 'combatDone' });
+  E.applyAction(g, b, { type: 'block', attackId: g.combat.attacks[0].id, cardId: theirs.id });
+  assert.deepEqual(g.combat.done, {});
+});
+
+test('old games are moved onto the big plane', () => {
+  const { g, a } = fresh3();
+  const bear = put(g, a, 'Grizzly Bears');
+  bear.x = 100;
+  bear.y = 50;
+  delete g.planeV;
+  E.upgradeGame(g);
+  assert.deepEqual([bear.x, bear.y], [2300, 1700]);
+});
+
+test('helper reads colour anthems', () => {
+  const r = I.suggestEffects({ name: 'Crusade', oracle: 'White creatures get +1/+1.' });
+  assert.deepEqual(r.suggestions.map((x) => x.text), ['All white creatures get +1/+1']);
+  assert.equal(r.unhandled, false);
+});
+
+test('first player draws on turn 1 in 3+ player games, but not in 2-player games', () => {
+  for (const n of [2, 3]) {
+    const g = E.createGame({ name: 'T' });
+    const ps = ['A', 'B', 'C'].slice(0, n).map((x) => E.joinGame(g, x).player);
+    for (const p of ps) E.applyAction(g, p, { type: 'loadDeck', deck: { name: 'D', cards: [{ name: 'Forest', qty: 30, typeLine: 'Basic Land' }] } });
+    E.applyAction(g, ps[0], { type: 'startGame' });
+    for (const p of ps) E.applyAction(g, p, { type: 'keep' });
+    for (let i = 0; i < 30 && g.setup.stage === 'roll'; i++) for (const p of ps) if (g.setup.eligible.includes(p.id)) E.applyAction(g, p, { type: 'rollInitiative', vx: 500, vy: 500 });
+    const first = ps.find((p) => p.id === g.turn.active);
+    assert.equal(first.zones.hand.length, n === 2 ? 7 : 8);
+  }
+});
+
+test('reactions on log lines toggle per player', () => {
+  const { g, a, b } = fresh3();
+  E.applyAction(g, a, { type: 'chat', text: 'gg' });
+  const id = g.log[g.log.length - 1].id;
+  E.applyAction(g, a, { type: 'react', logId: id, emoji: '💀' });
+  E.applyAction(g, b, { type: 'react', logId: id, emoji: '💀' });
+  assert.equal(g.log.find((e) => e.id === id).reactions['💀'].length, 2);
+  E.applyAction(g, a, { type: 'react', logId: id, emoji: '💀' });
+  assert.deepEqual(g.log.find((e) => e.id === id).reactions['💀'], [b.id]);
+  assert.throws(() => E.applyAction(g, a, { type: 'react', logId: id, emoji: '🍕' }), E.GameError);
 });

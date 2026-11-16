@@ -287,8 +287,16 @@
     if (msg.type === 'effects') updateSavedDeckEffects(msg.name, msg.effects);
   }
 
+  const HINTED = new Set(['move', 'createToken', 'placeDie', 'clone', 'resolveReveal', 'unattach']);
+
   async function act(action) {
     if (!session) return { error: 'Not connected.' };
+    if (S && HINTED.has(action.type) && action.x == null && !action.hint && (action.type !== 'move' || action.to === 'battlefield')) {
+      const c = action.cardId ? getCard(action.cardId) : null;
+      const pid = action.playerId || (c && c.zone === 'battlefield' ? c.zp : S.you);
+      const h = viewCenter(pid);
+      if (h) action.hint = h;
+    }
     const r = (await session.act(action)) || {};
     if (r.error) toast(r.error, 'error');
     if (r.pending) toast(`Asked ${r.pending.waitingFor} for permission…`);
@@ -373,7 +381,10 @@
     if (!S) return;
     document.title = `${S.name} · MTG Tabletop`;
     if (!U.phone) renderDesktop();
+    renderCombat();
     renderSetup();
+    renderReveal();
+    animateShuffles();
     renderRequests();
     renderModeBanner();
     if (viewer) renderViewer();
@@ -436,6 +447,7 @@
       }
     }
     for (const p of S.players) fillArea(p, opps.length);
+    for (const p of S.players) if (views[p.id] && views[p.id].auto) fitView(p.id, true);
     for (const p of S.players) {
       const a = areaEl(p.id);
       a.classList.toggle('active', S.turn.active === p.id);
@@ -456,9 +468,6 @@
     area.innerHTML = `<div class="ppanel"></div>
       <div class="bf" data-pid="${p.id}">
         <div class="bf-table" data-drop="bf" data-player="${p.id}">
-          <div class="zone-hint" style="top:82px">CREATURES</div>
-          <div class="zone-hint" style="top:332px">OTHER PERMANENTS</div>
-          <div class="zone-hint" style="top:582px">LANDS</div>
           <div class="layer"></div>
         </div>
         <div class="bf-owner"></div>
@@ -567,7 +576,7 @@
     if (!isMe || compact) {
       const z = p.zones;
       const zb = (zone, label, count) =>
-        `<button class="zbtn" data-act="zone" data-pid="${p.id}" data-zone="${zone}" data-drop="zone" data-zone-target="${zone}">${label} <b>${count}</b></button>`;
+        `<button class="zbtn" data-act="zone" data-pid="${p.id}" data-zone="${zone}" data-drop="zone" data-zone-target="${zone}" ${zone === 'library' ? `data-lib="${p.id}"` : ''}>${label} <b>${count}</b></button>`;
       rows.push(`<div class="zones">${zb('hand', 'Hand', p.handCount)}${zb('library', 'Library', p.libraryCount)}${zb('graveyard', 'Grave', z.graveyard.length)}${zb(
         'exile',
         'Exile',
@@ -615,11 +624,23 @@
     const gy = top(z.graveyard);
     const ex = top(z.exile);
     const cmd = z.command.map((id) => S.cards[id]).filter(Boolean);
-    let html = pile('library', 'Library', mine.libraryCount, libInner);
+    let html = pile('library', 'Library', mine.libraryCount, libInner).replace('data-pile="library"', `data-pile="library" data-lib="${mine.id}"`);
     html += pile('graveyard', 'Graveyard', z.graveyard.length, gy ? cardHTML(gy, 'pile') : '');
     html += pile('exile', 'Exile', z.exile.length, ex ? cardHTML(ex, 'pile') : '');
     if (S.format === 'commander' || cmd.length) html += pile('command', 'Command', cmd.length, cmd.length ? cardHTML(cmd[0], 'pile') : '', 'cmd');
     $('#piles').innerHTML = html;
+  }
+
+  function reactionsHTML(e) {
+    const r = e.reactions || {};
+    const chips = Object.entries(r)
+      .filter(([, ids]) => ids.length)
+      .map(([emo, ids]) => {
+        const names = ids.map((id) => (id === S.you ? 'You' : (playerById(id) || {}).name || '?')).join(', ');
+        return `<button class="rx-chip ${ids.includes(S.you) ? 'mine' : ''}" data-rx="${emo}" data-log="${e.id}" title="${esc(names)}">${emo}<b>${ids.length}</b></button>`;
+      })
+      .join('');
+    return `${chips}<button class="rx-add" data-rxpick="${e.id}" title="React">☺︎+</button>`;
   }
 
   function renderLog(log) {
@@ -633,20 +654,55 @@
     }
     const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
     for (const e of entries) {
-      if (e.id <= last) continue;
+      const sig = JSON.stringify(e.reactions || {});
+      if (e.id <= last) {
+        // reactions can change on lines already shown
+        const row = log.querySelector(`.e[data-log="${e.id}"]`);
+        if (row && row.dataset.rxsig !== sig) {
+          row.dataset.rxsig = sig;
+          row.querySelector('.rx').innerHTML = reactionsHTML(e);
+        }
+        continue;
+      }
       const d = document.createElement('div');
       d.className = `e ${e.kind ? `k-${e.kind}` : ''}`;
+      d.dataset.log = e.id;
+      d.dataset.rxsig = sig;
       const time = new Date(e.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       d.innerHTML =
-        e.kind === 'chat'
+        (e.kind === 'chat'
           ? `<span class="t">${time}</span><b style="color:${esc(e.color)}">${esc(e.who)}:</b> ${esc(e.text)}`
-          : `<span class="t">${time}</span>${esc(e.text)}`;
+          : `<span class="t">${time}</span>${esc(e.text)}`) + `<div class="rx">${reactionsHTML(e)}</div>`;
       log.appendChild(d);
       last = e.id;
     }
     log.dataset.last = String(last);
     if (nearBottom) log.scrollTop = log.scrollHeight;
   }
+
+  /** Reactions: tap a chip to add/remove yours, ☺︎+ to pick one. */
+  document.addEventListener('click', (e) => {
+    const chip = e.target.closest('.rx-chip[data-rx]');
+    if (chip) return act({ type: 'react', logId: Number(chip.dataset.log), emoji: chip.dataset.rx });
+    const add = e.target.closest('[data-rxpick]');
+    const old = $('#rx-pick');
+    if (old && !e.target.closest('#rx-pick')) old.remove();
+    if (!add) return;
+    const box = document.createElement('div');
+    box.id = 'rx-pick';
+    box.className = 'rx-pick';
+    box.innerHTML = E.REACTIONS.map((emo) => `<button data-rxgo="${emo}">${emo}</button>`).join('');
+    document.body.appendChild(box);
+    const r = add.getBoundingClientRect();
+    const w = box.getBoundingClientRect().width;
+    box.style.left = `${clamp(r.left - w / 2, 6, innerWidth - w - 6)}px`;
+    box.style.top = `${Math.max(6, r.top - 50)}px`;
+    box.addEventListener('click', (ev) => {
+      const b = ev.target.closest('[data-rxgo]');
+      if (b) act({ type: 'react', logId: Number(add.dataset.rxpick), emoji: b.dataset.rxgo });
+      box.remove();
+    });
+  });
 
   /* -------------------------------------------------------------- cards */
 
@@ -657,7 +713,13 @@
     if ((c.counters || {}).charge) out.push(`<span class="cb chg">${BOLT}${c.counters.charge}</span>`);
     const fx = c.stats && c.stats.fx;
     if (fx && (fx.p || fx.t)) out.push(`<span class="cb fx">${SPARK}${sign(fx.p)}/${sign(fx.t)}</span>`);
-    return out.length ? `<div class="cbadges">${out.join('')}</div>` : '';
+    for (const [k, v] of Object.entries(c.counters || {}))
+      if (!['+1/+1', '-1/-1', 'charge', 'loyalty'].includes(k)) out.push(`<span class="cb misc">${esc(k)} ${v}</span>`);
+    let html = out.length ? `<div class="cbadges">${out.join('')}</div>` : '';
+    const isPw = /\bPlaneswalker\b/.test((c.flipped && c.backTypeLine) || c.typeLine || '');
+    const loyal = (c.counters || {}).loyalty;
+    if (loyal != null || (isPw && c.loyalty)) html += `<div class="loyal">${loyal != null ? loyal : esc(c.loyalty)}</div>`;
+    return html;
   }
 
   function cardInner(c) {
@@ -699,6 +761,9 @@
     }
     el.classList.toggle('tapped', ctx === 'bf' && !!c.tapped);
     el.classList.toggle('selected', !!(mode && mode.kind === 'proliferate' && mode.cards.has(c.id)));
+    const ci = S && S.combat ? combatInfo() : null;
+    el.classList.toggle('attacking', ctx === 'bf' && !!ci && ci.attacking.has(c.id));
+    el.classList.toggle('blocking', ctx === 'bf' && !!ci && ci.blocking.has(c.id));
     const inner = cardInner(c);
     if (el._sig !== inner) {
       el.innerHTML = inner;
@@ -753,10 +818,13 @@
 
   /* -------------------------------------------------------- battlefield */
 
+  const DEFAULT_Z = 1.15; // cards about 115px wide on a computer
+  const FIT_PAD = 60; // screen pixels of breathing room when fitting
+
   function setupBattlefield(bf, pid) {
-    views[pid] = views[pid] || { x: 0, y: 0, z: 0.5, auto: true };
+    views[pid] = views[pid] || { x: 0, y: 0, z: DEFAULT_Z, auto: true };
     const ro = new ResizeObserver(() => {
-      if (views[pid].auto) fitView(pid);
+      if (views[pid].auto) fitView(pid, true);
     });
     ro.observe(bf);
     bf.addEventListener(
@@ -783,14 +851,54 @@
     for (const bf of $$(`.bf[data-pid="${pid}"]`)) bf.querySelector('.bf-table').style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.z})`;
   }
 
-  function fitView(pid) {
+  /** Bounding box of everything on a player's battlefield (table units), or null. */
+  function cardsBox(pid) {
+    const p = playerById(pid);
+    if (!p) return null;
+    const items = p.zones.battlefield.map((id) => S.cards[id]).filter(Boolean).map((c) => ({ x: c.x, y: c.y, w: 100, h: 140 }));
+    for (const d of Object.values(S.dice || {})) if (d.owner === pid) items.push({ x: d.x, y: d.y, w: 70, h: 70 });
+    if (!items.length) return null;
+    const x0 = Math.min(...items.map((i) => i.x));
+    const y0 = Math.min(...items.map((i) => i.y));
+    const x1 = Math.max(...items.map((i) => i.x + i.w));
+    const y1 = Math.max(...items.map((i) => i.y + i.h));
+    return { x0, y0, x1, y1 };
+  }
+
+  /**
+   * Fit every card on that battlefield on screen with a border around it.
+   * soft = the automatic view: never zooms in past the default card size.
+   */
+  function fitView(pid, soft = false, rectOverride) {
+    if (!S) return;
     const bf = bfEls(pid)[0];
-    if (!bf || !S) return;
-    const r = bf.getBoundingClientRect();
-    if (!r.width || !r.height) return;
-    const z = Math.min(r.width / S.table.w, r.height / S.table.h) * 0.98;
-    views[pid] = { z, x: (r.width - S.table.w * z) / 2, y: (r.height - S.table.h * z) / 2, auto: true };
+    const r = rectOverride || (bf && bf.getBoundingClientRect());
+    if (!r || !r.width || !r.height) return;
+    const box = cardsBox(pid);
+    let z = DEFAULT_Z * (U.phone ? 0.75 : 1);
+    let cx = S.table.w / 2;
+    let cy = S.table.h / 2;
+    if (box) {
+      const zw = (r.width - FIT_PAD * 2) / (box.x1 - box.x0);
+      const zh = (r.height - FIT_PAD * 2) / (box.y1 - box.y0);
+      // the automatic view keeps cards big (pan or press Fit to see everything); Fit shows it all
+      z = soft ? clamp(Math.min(zw, zh), z * 0.8, z) : clamp(Math.min(zw, zh, z * 1.6), 0.12, 3);
+      cx = (box.x0 + box.x1) / 2;
+      cy = (box.y0 + box.y1) / 2;
+    }
+    views[pid] = { z, x: r.width / 2 - cx * z, y: r.height / 2 - cy * z, auto: true };
     applyView(pid);
+    if (U.phone && window.MTGPhone) window.MTGPhone.applyView(pid);
+  }
+
+  /** The table point at the middle of what this player is looking at (used to place new cards). */
+  function viewCenter(pid) {
+    if (U.phone && window.MTGPhone) return window.MTGPhone.viewCenter(pid);
+    const bf = bfEls(pid)[0];
+    const v = views[pid];
+    if (!bf || !v) return null;
+    const r = bf.getBoundingClientRect();
+    return { x: Math.round((r.width / 2 - v.x) / v.z), y: Math.round((r.height / 2 - v.y) / v.z) };
   }
 
   function zoomAt(pid, factor, cx, cy) {
@@ -800,7 +908,7 @@
     const r = bf.getBoundingClientRect();
     const px = cx - r.left;
     const py = cy - r.top;
-    const nz = clamp(v.z * factor, 0.15, 3);
+    const nz = clamp(v.z * factor, 0.12, 3);
     v.x = px - ((px - v.x) * nz) / v.z;
     v.y = py - ((py - v.y) * nz) / v.z;
     v.z = nz;
@@ -827,7 +935,7 @@
     if (d.seq && diceSeen[d.id] !== d.seq) {
       diceSeen[d.id] = d.seq;
       if (!firstState) {
-        animateDie(el, E.simulateDie(d.sx, d.sy, d.vx, d.vy, S.table.w, S.table.h), d.value, `bf:${d.id}`);
+        animateDie(el, E.simulateDie(d.sx, d.sy, d.vx, d.vy, d.rw || S.table.w, d.rh || S.table.h, 70, d.rx || 0, d.ry || 0), d.value, `bf:${d.id}`);
         return el;
       }
     }
@@ -1092,6 +1200,203 @@
     );
   });
 
+  /* ============================================================= combat */
+
+  let combatDef = null; // which defending player's side of combat we're looking at
+
+  function combatInfo() {
+    const cb = S.combat;
+    if (!cb) return null;
+    const attacking = new Set(cb.attacks.map((a) => a.cardId));
+    const blocking = new Set();
+    for (const a of cb.attacks) for (const b of a.blockers) blocking.add(b);
+    return { cb, attacking, blocking };
+  }
+
+  /** Defenders you can flip between in the combat box. */
+  function combatDefenders() {
+    const cb = S.combat;
+    return seatOrder().filter((id) => id !== cb.attacker);
+  }
+
+  function currentCombatDef() {
+    const cb = S.combat;
+    const list = combatDefenders();
+    if (!U.phone && cb.attacker === S.you && boardView !== 'grid' && list.includes(selectedOpp)) combatDef = selectedOpp;
+    if (!list.includes(combatDef)) combatDef = list.includes(S.you) ? S.you : list[0];
+    return combatDef;
+  }
+
+  function setCombatDef(id) {
+    combatDef = id;
+  }
+
+  function switchCombatDef(dir) {
+    const list = combatDefenders();
+    const i = list.indexOf(currentCombatDef());
+    combatDef = list[(i + dir + list.length) % list.length];
+    if (S.combat.attacker === S.you) selectedOpp = combatDef;
+    render();
+  }
+
+  function combatColumnHTML(at, cb) {
+    const iAttack = cb.attacker === S.you;
+    const iDefend = at.defender === S.you;
+    const att = S.cards[at.cardId];
+    const mods = at.mods
+      .map((m, i) => `<button class="cb-mod" data-cb="mod" data-at="${at.id}" data-i="${i}" title="Click to move or remove">${m.op === 'x' ? `×${m.n}` : sign(m.n)}</button>`)
+      .join('<span class="cb-arrow">→</span>');
+    const blockers = at.blockers
+      .map(
+        (bid, i) => `<div class="cb-blocker">${S.cards[bid] ? cardHTML(S.cards[bid], 'combat') : ''}
+          <div class="cb-bbtns">${iAttack || iDefend ? `<button class="btn tiny" data-cb="bup" data-at="${at.id}" data-i="${i}" title="Earlier">▲</button><button class="btn tiny" data-cb="bdown" data-at="${at.id}" data-i="${i}" title="Later">▼</button>` : ''}
+          ${iDefend ? `<button class="btn tiny" data-cb="unblock" data-card="${bid}" title="Stop blocking">✕</button>` : ''}</div></div>`,
+      )
+      .join('');
+    return `<div class="cb-col" data-drop="block" data-attack="${at.id}">
+      <div class="cb-dmg" title="Damage this creature deals if it connects">${at.dmg == null ? '?' : at.dmg}</div>
+      ${mods ? `<div class="cb-mods">${mods}</div>` : ''}
+      <div class="cb-att">${att ? cardHTML(att, 'combat') : ''}${iAttack ? `<button class="btn tiny cb-x" data-cb="unattack" data-at="${at.id}" title="Stop attacking">✕</button>` : ''}</div>
+      <div class="cb-blockers">${blockers || `<div class="cb-noblock muted small">${iDefend ? 'Drag a creature here to block' : 'Unblocked'}</div>`}</div>
+      ${iAttack ? `<div class="cb-btns"><button class="btn tiny" data-cb="plus" data-at="${at.id}">+X</button><button class="btn tiny" data-cb="times" data-at="${at.id}">×N</button>${at.mods.length ? `<button class="btn tiny" data-cb="reset" data-at="${at.id}">reset</button>` : ''}</div>` : ''}
+    </div>`;
+  }
+
+  function renderCombat() {
+    const box = $('#combat');
+    const cb = S.combat;
+    const isActive = S.turn.active === S.you;
+    $('#btn-combat').hidden = !isActive || !!cb;
+    if (!cb || U.phone) {
+      box.hidden = true;
+      box.innerHTML = '';
+      return;
+    }
+    box.hidden = false;
+    const def = currentCombatDef();
+    const defP = playerById(def);
+    const attP = playerById(cb.attacker);
+    const iAttack = cb.attacker === S.you;
+    const inIt = cb.participants.includes(S.you);
+    const targets = [{ kind: 'player', id: def }];
+    for (const id of defP ? defP.zones.battlefield : []) {
+      const c = S.cards[id];
+      if (c && /\b(Planeswalker|Battle)\b/.test(c.typeLine || '')) targets.push({ kind: 'pw', id });
+    }
+    const atFor = (t) => cb.attacks.filter((a) => a.target.kind === t.kind && a.target.id === t.id);
+    const total = (list) => list.reduce((s, a) => s + (a.dmg || 0), 0);
+    const playerTotal = total(atFor(targets[0]));
+    const ready = cb.participants
+      .map((id) => {
+        const p = playerById(id);
+        return `<span class="cb-chip ${cb.done[id] ? 'ok' : ''}">${esc(p ? (id === S.you ? 'You' : p.name) : '?')} ${cb.done[id] ? '✓' : '…'}</span>`;
+      })
+      .join('');
+    const defs = combatDefenders();
+    box.innerHTML = `<div class="cb-head">
+        <b>⚔ ${esc(iAttack ? 'You are' : `${attP ? attP.name : '?'} is`)} attacking</b>
+        ${defs.length > 1 ? '<button class="btn tiny" data-cb="prev">◀</button>' : ''}
+        <span class="cb-def">${esc(def === S.you ? 'you' : defP ? defP.name : '?')}</span>
+        ${defs.length > 1 ? '<button class="btn tiny" data-cb="next">▶</button>' : ''}
+        <span class="cb-total" title="Total damage at the player if everything connects">Total: <b>${playerTotal}</b></span>
+        <span class="spacer"></span>
+        <span class="cb-ready">${ready}</span>
+        ${inIt ? `<button class="btn small ${cb.done[S.you] ? '' : 'primary'}" data-cb="done">${cb.done[S.you] ? 'Not done yet' : 'Done ✓'}</button>` : ''}
+        ${iAttack ? '<button class="btn small ghost" data-cb="cancel">Cancel combat</button>' : ''}
+      </div>
+      <div class="cb-body">${targets
+        .map((t) => {
+          const list = atFor(t);
+          const label =
+            t.kind === 'player'
+              ? `<span class="dot" style="background:${esc(defP ? defP.color : '#888')}"></span>${esc(def === S.you ? 'You' : defP ? defP.name : '?')} ♥ ${defP ? defP.life : '?'}`
+              : `${esc(S.cards[t.id].name)} <span class="loyal-inline">${(S.cards[t.id].counters || {}).loyalty != null ? S.cards[t.id].counters.loyalty : esc(S.cards[t.id].loyalty || '?')}</span>`;
+          return `<div class="cb-target ${t.kind}" data-drop="attack" data-tkind="${t.kind}" data-tid="${t.id}">
+            <div class="cb-tlabel">${label}${t.kind === 'pw' ? ` · <b>${total(list)}</b>` : ''}</div>
+            <div class="cb-cols">${list.map((a) => combatColumnHTML(a, cb)).join('') || `<div class="cb-empty muted small">${iAttack ? 'Drag attackers here' : 'No attackers'}</div>`}</div>
+          </div>`;
+        })
+        .join('')}</div>`;
+  }
+
+  $('#combat').addEventListener('click', (e) => combatClick(e));
+
+  async function combatClick(e) {
+    const b = e.target.closest('[data-cb]');
+    if (!b || !S.combat) return;
+    const at = S.combat.attacks.find((a) => a.id === b.dataset.at);
+    switch (b.dataset.cb) {
+      case 'prev':
+        return switchCombatDef(-1);
+      case 'next':
+        return switchCombatDef(1);
+      case 'done':
+        return act({ type: 'combatDone', value: !S.combat.done[S.you] });
+      case 'cancel':
+        if (await confirmBox('Cancel combat?', 'All attackers and blockers are cleared and nothing is tapped.', 'Cancel combat', true)) act({ type: 'combatCancel' });
+        return;
+      case 'unattack':
+        return act({ type: 'removeAttack', attackId: b.dataset.at });
+      case 'unblock':
+        return act({ type: 'unblock', cardId: b.dataset.card });
+      case 'plus': {
+        const n = await askNumber('Add how much damage? (use a minus number to reduce)', 1);
+        if (n) act({ type: 'combatMod', attackId: b.dataset.at, op: '+', n });
+        return;
+      }
+      case 'times': {
+        const n = await askNumber('Multiply the damage by?', 2);
+        if (n != null) act({ type: 'combatMod', attackId: b.dataset.at, op: 'x', n });
+        return;
+      }
+      case 'reset':
+        return act({ type: 'combatMod', attackId: b.dataset.at, op: 'reset' });
+      case 'mod': {
+        const i = Number(b.dataset.i);
+        const r = b.getBoundingClientRect();
+        return showMenu(
+          [
+            { header: 'Damage change (applied left to right)' },
+            { label: '◀ Apply earlier', disabled: i === 0, fn: () => act({ type: 'combatMod', attackId: at.id, op: 'move', index: i, dir: 'left' }) },
+            { label: 'Apply later ▶', disabled: i === at.mods.length - 1, fn: () => act({ type: 'combatMod', attackId: at.id, op: 'move', index: i, dir: 'right' }) },
+            S.combat.attacker === S.you ? { label: 'Remove', fn: () => act({ type: 'combatMod', attackId: at.id, op: 'remove', index: i }) } : null,
+          ],
+          r.left,
+          r.bottom,
+        );
+      }
+      case 'bup':
+      case 'bdown': {
+        const i = Number(b.dataset.i);
+        const j = b.dataset.cb === 'bup' ? i - 1 : i + 1;
+        if (j < 0 || j >= at.blockers.length) return;
+        const order = at.blockers.slice();
+        [order[i], order[j]] = [order[j], order[i]];
+        return act({ type: 'orderBlockers', attackId: at.id, order });
+      }
+      default:
+    }
+  }
+
+  /** Dropping a creature into the combat box. */
+  function combatDrop(c, t) {
+    const cb = S.combat;
+    if (!cb || !c || c.zone !== 'battlefield') return false;
+    if (t.dataset.drop === 'attack') {
+      if (cb.attacker !== S.you) return toast('Drop your creature on an attacker\'s column to block it.'), true;
+      act({ type: 'declareAttack', cardId: c.id, target: { kind: t.dataset.tkind, id: t.dataset.tid } });
+      return true;
+    }
+    if (t.dataset.drop === 'block') {
+      const at = cb.attacks.find((a) => a.id === t.dataset.attack);
+      if (!at) return true;
+      if (cb.attacker === S.you && c.zp === S.you) act({ type: 'declareAttack', cardId: c.id, target: at.target });
+      else act({ type: 'block', attackId: at.id, cardId: c.id });
+      return true;
+    }
+    return false;
+  }
+
   /* =========================================================== requests */
 
   const shownRequests = new Set();
@@ -1334,7 +1639,7 @@
       else if (d.ctx === 'pile') {
         const pileEl = d.el.closest('[data-pile]');
         if (pileEl) openViewer(S.you, pileEl.dataset.pile);
-      } else if (d.ctx === 'libtop') act({ type: 'draw', n: 1 });
+      } else if (d.ctx === 'libtop') libraryClick(e.clientX, e.clientY);
       return;
     }
     d.el.classList.remove('dragging-src');
@@ -1386,6 +1691,10 @@
       }
       case 'stack':
         if (c.zone !== 'stack') act({ type: 'move', cardId: c.id, to: 'stack' });
+        break;
+      case 'attack':
+      case 'block':
+        combatDrop(c, t);
         break;
       default:
         break;
@@ -1496,6 +1805,22 @@
         host.insertAdjacentHTML('beforeend', `<a class="mi" href="${esc(it.href)}" target="_blank" rel="noopener">${esc(it.label)}</a>`);
         continue;
       }
+      if (it.row) {
+        const row = document.createElement('div');
+        row.className = 'mrow2';
+        for (const sub of it.row) {
+          const b = document.createElement('button');
+          b.className = `mi ${sub.cls || ''}`;
+          b.textContent = sub.label;
+          b.addEventListener('click', () => {
+            m.hidden = true;
+            sub.fn();
+          });
+          row.appendChild(b);
+        }
+        host.appendChild(row);
+        continue;
+      }
       const b = document.createElement('button');
       b.className = `mi ${it.disabled ? 'disabled' : ''} ${it.cls || ''}`;
       b.textContent = it.label;
@@ -1535,6 +1860,7 @@
     if (cardElm) {
       const c = getCard(cardElm.dataset.id);
       if (c) items = cardMenu(c, cardElm.dataset.ctx);
+      if (c && c.zone === 'battlefield' && Object.keys(c.counters || {}).length) openCounterPanel(c.id, cardElm);
     } else if (e.target.closest('[data-pile="library"]')) items = libraryMenu();
     else if (e.target.closest('[data-pile="graveyard"]')) items = zoneBulkMenu('graveyard');
     else if (e.target.closest('[data-pile="exile"]')) items = zoneBulkMenu('exile');
@@ -1561,7 +1887,6 @@
     if (onBf) {
       items.push({ label: c.tapped ? 'Untap  (T)' : 'Tap  (T)', fn: () => act({ type: 'tap', cardId: c.id }) });
       items.push({ label: 'Counters…', fn: () => countersDialog(c.id) });
-      items.push({ label: 'Add +1/+1 counter', fn: () => act({ type: 'cardCounter', cardId: c.id, name: '+1/+1', delta: 1 }) });
       items.push({ label: 'Power/toughness bonus…', fn: () => ptDialog(c) });
       if (c.backImg) items.push({ label: 'Transform / flip  (F)', fn: () => act({ type: 'flip', cardId: c.id }) });
       items.push({ label: c.faceDown ? 'Turn face up' : 'Turn face down', fn: () => act({ type: 'faceDown', cardId: c.id }) });
@@ -1569,8 +1894,9 @@
       else items.push({ label: 'Attach to…', fn: () => startAttach(c) });
       items.push({ label: c.note ? 'Edit note…' : 'Add note…', fn: () => noteDialog(c) });
       if (!c.hidden) items.push({ label: 'Create a token copy', fn: () => act({ type: 'clone', cardId: c.id }) });
-      for (const p of S.players)
-        if (p.id !== c.zp) items.push({ label: `Give control to ${p.name}`, fn: () => act({ type: 'move', cardId: c.id, to: 'battlefield', playerId: p.id }) });
+      if (U.phone)
+        for (const p of S.players)
+          if (p.id !== c.zp) items.push({ label: `Give control to ${p.name}`, fn: () => act({ type: 'move', cardId: c.id, to: 'battlefield', playerId: p.id }) });
     } else if (c.backImg && !c.hidden && c.zone !== 'library') {
       items.push({ label: 'Transform / flip', fn: () => act({ type: 'flip', cardId: c.id }) });
     }
@@ -1582,14 +1908,17 @@
     items.push({ sep: true });
     items.push({ header: 'Move to' });
     const mv = (label, to, extra = {}) => ({ label, fn: () => act({ type: 'move', cardId: c.id, to, ...extra }) });
-    if (!onBf) items.push(mv('Battlefield', 'battlefield', { playerId: S.you }));
+    // On a computer you drag cards to the battlefield, hand, stack, graveyard, exile and library,
+    // so only the moves dragging can't do are listed. Phones keep the full list.
+    const full = U.phone;
+    if (!onBf && full) items.push(mv('Battlefield', 'battlefield', { playerId: S.you }));
     if (ctx === 'hand') items.push(mv('Battlefield face down', 'battlefield', { playerId: S.you, faceDown: true }));
-    if (c.zone !== 'stack') items.push(mv('Stack', 'stack'));
-    if (c.zone !== 'hand') items.push(mv("Owner's hand", 'hand'));
-    if (c.zone !== 'graveyard') items.push(mv('Graveyard', 'graveyard'));
-    if (c.zone !== 'exile') items.push(mv('Exile', 'exile'));
+    if (c.zone !== 'stack' && full) items.push(mv('Stack', 'stack'));
+    if (c.zone !== 'hand' && full) items.push(mv("Owner's hand", 'hand'));
+    if (c.zone !== 'graveyard' && full) items.push(mv('Graveyard', 'graveyard'));
+    if (c.zone !== 'exile' && full) items.push(mv('Exile', 'exile'));
     if (c.zone !== 'exile') items.push(mv('Exile face down', 'exile', { faceDown: true }));
-    items.push(mv('Top of library', 'library', { pos: 'top' }));
+    if (full) items.push(mv('Top of library', 'library', { pos: 'top' }));
     items.push(mv('Bottom of library', 'library', { pos: 'bottom' }));
     if (c.zone !== 'command' && (c.isCommander || S.format === 'commander')) items.push(mv('Command zone', 'command'));
     if (!c.hidden) {
@@ -1601,18 +1930,22 @@
 
   function libraryMenu() {
     const m = me();
+    const ask = (title, def, fn) => async () => {
+      const n = await askNumber(title, def);
+      if (n) fn(n);
+    };
     return [
-      { header: `Your library (${m ? m.libraryCount : 0})` },
-      { label: 'Draw a card  (D)', fn: () => act({ type: 'draw', n: 1 }) },
-      { label: 'Draw X…', fn: async () => { const n = await askNumber('Draw how many?', 2); if (n) act({ type: 'draw', n }); } },
-      { label: 'Search library…', fn: () => openViewer(S.you, 'library') },
-      { label: 'Look at top X… (scry / surveil)', fn: async () => { const n = await askNumber('Look at how many cards from the top?', 3); if (n) openViewer(S.you, 'library', n); } },
+      { header: `Your library (${m ? m.libraryCount : 0}) · double-click to draw` },
+      { row: [{ label: 'Draw', fn: () => act({ type: 'draw', n: 1 }) }, { label: 'Draw X…', cls: 'x', fn: ask('Draw how many?', 2, (n) => act({ type: 'draw', n })) }] },
+      { row: [{ label: 'Mill', fn: () => act({ type: 'mill', n: 1 }) }, { label: 'Mill X…', cls: 'x', fn: ask('Mill how many?', 2, (n) => act({ type: 'mill', n })) }] },
+      { row: [{ label: 'Peek', fn: () => openViewer(S.you, 'library', 1) }, { label: 'Peek X…', cls: 'x', fn: ask('Look at how many cards from the top?', 3, (n) => openViewer(S.you, 'library', n)) }] },
+      { label: 'Reveal until…', fn: revealDialog },
+      { label: 'Search…', fn: () => openViewer(S.you, 'library') },
       { label: 'Shuffle', fn: () => act({ type: 'shuffle' }) },
-      { label: 'Mill X…', fn: async () => { const n = await askNumber('Mill how many?', 1); if (n) act({ type: 'mill', n }); } },
+      { sep: true },
       { label: 'Exile top card', fn: () => act({ type: 'exileTop', n: 1 }) },
       { label: 'Exile top card face down', fn: () => act({ type: 'exileTop', n: 1, faceDown: true }) },
       { label: m && m.revealTop ? 'Stop revealing top card' : 'Play with top card revealed', fn: () => act({ type: 'revealTop' }) },
-      { sep: true },
       {
         label: 'Shuffle hand in & draw 7',
         fn: async () => {
@@ -1620,6 +1953,103 @@
         },
       },
     ];
+  }
+
+  /** Single click = menu, double click = draw (the first click waits a moment to tell them apart). */
+  let libClickTimer = null;
+  function libraryClick(x, y) {
+    if (libClickTimer) {
+      clearTimeout(libClickTimer);
+      libClickTimer = null;
+      return act({ type: 'draw', n: 1 });
+    }
+    libClickTimer = setTimeout(() => {
+      libClickTimer = null;
+      showMenu(libraryMenu(), x, y);
+    }, 260);
+  }
+
+  async function revealDialog() {
+    const { value, root } = await dialog({
+      title: 'Reveal until…',
+      body: `<p class="muted small" style="margin:0">Cards are revealed from the top of your library, one at a time, until one matches everything you set. Everyone sees them.</p>
+        <label class="form">Card type or word <input id="rv-type" placeholder="e.g. creature, land, Dragon, Equipment"></label>
+        <label class="form">Colour <select id="rv-color"><option value="">any</option>${['W', 'U', 'B', 'R', 'G', 'C', 'M']
+          .map((c) => `<option value="${c}">${{ W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green', C: 'colorless', M: 'multicolored' }[c]}</option>`)
+          .join('')}</select></label>
+        <label class="form">Mana value <span class="row gap"><select id="rv-op"><option value="">any</option><option value="<=">at most</option><option value="=">exactly</option><option value=">=">at least</option></select>
+          <input id="rv-mv" type="number" min="0" value="3" style="width:80px"></span></label>`,
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Reveal', value: 'ok', primary: true }],
+    });
+    if (value !== 'ok') return;
+    act({
+      type: 'revealUntil',
+      typeWord: root.querySelector('#rv-type').value.trim(),
+      color: root.querySelector('#rv-color').value,
+      mvOp: root.querySelector('#rv-op').value,
+      mv: Number(root.querySelector('#rv-mv').value) || 0,
+    });
+  }
+
+  /** Everyone sees revealed cards; the revealer chooses where they go. */
+  function renderReveal() {
+    let box = $('#reveal');
+    const rv = S.reveal;
+    if (!rv) {
+      if (box) box.remove();
+      return;
+    }
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'reveal';
+      box.className = 'reveal';
+      document.body.appendChild(box);
+      box.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-rv]');
+        if (b) b.parentElement.querySelectorAll('[data-rv]').forEach((x) => x.classList.toggle('on', x === b));
+        if (e.target.closest('.rv-go')) {
+          const f = box.querySelector('[data-grp="found"] .on');
+          const r = box.querySelector('[data-grp="rest"] .on');
+          act({ type: 'resolveReveal', found: f ? f.dataset.rv : 'hand', rest: r ? r.dataset.rv : 'bottom' });
+        }
+      });
+    }
+    const who = playerById(rv.pid);
+    const mine = rv.pid === S.you;
+    const key = `${rv.ids.join()}|${mine}`;
+    if (box.dataset.key === key) return;
+    box.dataset.key = key;
+    box.innerHTML = `<div class="rv-head"><b>${esc(who ? (mine ? 'You' : who.name) : '?')} revealed until ${esc(rv.crit)}</b>
+        <span class="muted">${rv.found ? 'Found one!' : 'Nothing matched.'}</span></div>
+      <div class="rv-cards">${rv.ids.map((id) => `<div class="rv-card ${id === rv.found ? 'found' : ''}">${cardHTML(S.cards[id], 'reveal')}</div>`).join('')}</div>
+      ${
+        mine
+          ? `<div class="rv-choose">${rv.found ? '<div class="grp" data-grp="found"><span>Found card →</span><button class="btn small on" data-rv="hand">Hand</button><button class="btn small" data-rv="battlefield">Battlefield</button><button class="btn small" data-rv="top">Top of library</button></div>' : ''}
+            <div class="grp" data-grp="rest"><span>The rest →</span><button class="btn small on" data-rv="bottom">Bottom (random order)</button><button class="btn small" data-rv="graveyard">Graveyard</button><button class="btn small" data-rv="exile">Exile</button></div>
+            <button class="btn primary rv-go">Done</button></div>`
+          : `<div class="muted small">Waiting for ${esc(who ? who.name : '?')} to decide where they go…</div>`
+      }`;
+  }
+
+  /** A little riffle on a library whenever its owner shuffles. */
+  const shuffleSeen = {};
+  function animateShuffles() {
+    for (const p of S.players) {
+      const seq = p.shuffleSeq || 0;
+      if (shuffleSeen[p.id] === undefined || firstState) {
+        shuffleSeen[p.id] = seq;
+        continue;
+      }
+      if (seq === shuffleSeen[p.id]) continue;
+      shuffleSeen[p.id] = seq;
+      const els = $$(`[data-lib="${p.id}"]`);
+      for (const el of els) {
+        el.classList.remove('shuffling');
+        void el.offsetWidth;
+        el.classList.add('shuffling');
+        setTimeout(() => el.classList.remove('shuffling'), 900);
+      }
+    }
   }
 
   function zoneBulkMenu(zone) {
@@ -1665,7 +2095,86 @@
     act({ type: 'createToken', ...tpl, count: 1 });
   }
 
+  const QUICK_COUNTERS = ['+1/+1', '-1/-1', 'charge', 'loyalty', 'shield', 'stun', 'lore', 'time', 'oil', 'fire', 'finality'];
+
+  /** Edit a permanent's counters. Nothing is logged until you press Save; ✕ discards. */
+  function openCounterPanel(cardId, anchor) {
+    const c = getCard(cardId);
+    if (!c) return;
+    closeCounterPanel();
+    const draft = { ...(c.counters || {}) };
+    const box = document.createElement('div');
+    box.className = 'cpanel';
+    box.id = 'cpanel';
+    box.innerHTML = `<div class="cp-head"><b>Counters</b><span class="muted small">${esc(c.faceDown ? 'face-down card' : c.name)}</span><button class="cp-x" title="Close without saving">✕</button></div>
+      <div class="cp-rows"></div>
+      <div class="quick cp-quick">${QUICK_COUNTERS.map((q) => `<button class="btn tiny" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div>
+      <div class="row gap"><input class="cp-custom" placeholder="Other counter (e.g. fire)" maxlength="20" data-noenter="1" style="flex:1;min-width:0"><button class="btn small cp-add">Add</button></div>
+      <button class="btn primary cp-save">Save</button>`;
+    document.body.appendChild(box);
+    const draw = () => {
+      const keys = Object.keys(draft);
+      box.querySelector('.cp-rows').innerHTML = keys.length
+        ? keys
+            .map(
+              (k) => `<div class="cp-row"><span class="nm">${esc(k)}</span><button class="btn tiny" data-k="${esc(k)}" data-d="-1">−</button>
+                <input type="number" inputmode="numeric" data-in="${esc(k)}" value="${draft[k]}"><button class="btn tiny" data-k="${esc(k)}" data-d="1">+</button></div>`,
+            )
+            .join('')
+        : '<p class="muted small" style="margin:0">No counters. Add some below.</p>';
+    };
+    draw();
+    box.addEventListener('input', (e) => {
+      const k = e.target.dataset.in;
+      if (k != null) draft[k] = Number.parseInt(e.target.value, 10) || 0;
+    });
+    box.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.classList.contains('cp-x')) return closeCounterPanel();
+      if (b.classList.contains('cp-save')) {
+        act({ type: 'setCounters', cardId, counters: draft });
+        return closeCounterPanel();
+      }
+      if (b.dataset.k) {
+        draft[b.dataset.k] = Math.max(0, (draft[b.dataset.k] || 0) + Number(b.dataset.d));
+        draw();
+      }
+      const add = (name) => {
+        if (!name) return;
+        draft[name] = (draft[name] || 0) + 1;
+        draw();
+      };
+      if (b.dataset.q) add(b.dataset.q);
+      if (b.classList.contains('cp-add')) {
+        add(box.querySelector('.cp-custom').value.trim());
+        box.querySelector('.cp-custom').value = '';
+      }
+    });
+    // place it to the left of the card (or the right if there's no room)
+    const r = anchor && anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : null;
+    const w = box.getBoundingClientRect().width;
+    const h = box.getBoundingClientRect().height;
+    if (U.phone || !r) {
+      box.classList.add('centered');
+    } else {
+      let left = r.left - w - 10;
+      if (left < 6) left = Math.min(innerWidth - w - 6, r.right + 10);
+      box.style.left = `${left}px`;
+      box.style.top = `${clamp(r.top, 54, innerHeight - h - 6)}px`;
+    }
+  }
+  function closeCounterPanel() {
+    const old = $('#cpanel');
+    if (old) old.remove();
+  }
+
   function countersDialog(cardId) {
+    const el = $(`.card[data-id="${cardId}"]`);
+    return openCounterPanel(cardId, el);
+  }
+
+  function oldCountersDialog(cardId) {
     const QUICK = ['+1/+1', '-1/-1', 'charge', 'loyalty', 'shield', 'stun', 'lore', 'time', 'oil', 'finality', 'flying', 'deathtouch'];
     dialog({
       title: 'Counters',
@@ -1755,7 +2264,13 @@
     let body = `<label class="form">Kind <select data-f="kind">${Object.entries(KIND_LABEL)
       .map(([k, l]) => `<option value="${k}" ${e.kind === k ? 'selected' : ''}>${l}</option>`)
       .join('')}</select></label>`;
-    if (e.kind === 'pt') body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label><label class="form">Get +X / +Y ${pt}</label>`;
+    const extra = `<div class="row gap ef-extra"><label class="form">Colour <select data-f="color"><option value="">any</option>${['W', 'U', 'B', 'R', 'G', 'C', 'M']
+      .map((c) => `<option value="${c}" ${e.color === c ? 'selected' : ''}>${{ W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green', C: 'colorless', M: 'multicolored' }[c]}</option>`)
+      .join('')}</select></label>
+      <label class="form">Mana value <span class="row gap"><select data-f="mvOp"><option value="">any</option>${[['<=', 'at most'], ['=', 'exactly'], ['>=', 'at least']]
+        .map(([k, l]) => `<option value="${k}" ${e.mvOp === k ? 'selected' : ''}>${l}</option>`)
+        .join('')}</select><input data-f="mv" type="number" min="0" value="${e.mv != null ? e.mv : 3}" style="width:64px"></span></label></div>`;
+    if (e.kind === 'pt') body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label>${extra}<label class="form">Get +X / +Y ${pt}</label>`;
     if (e.kind === 'forEach')
       body += `<label class="form">Gets +X / +Y ${pt}</label>
         <label class="form">for each <input data-f="count" value="${esc(e.count || 'artifact')}" placeholder="artifact, creature, land, Elf…"></label>
@@ -1767,12 +2282,12 @@
         ]
           .map(([k, l]) => `<option value="${k}" ${e.where === k ? 'selected' : ''}>${l}</option>`)
           .join('')}</select></label>
-        <label class="row gap"><input type="checkbox" data-f="other" ${e.other ? 'checked' : ''}> don't count this card itself ("each other…")</label>`;
+        <label class="row gap"><input type="checkbox" data-f="other" ${e.other ? 'checked' : ''}> don't count this card itself ("each other…")</label>${extra}`;
     if (e.kind === 'etb')
-      body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label>
+      body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label>${extra}
         <label class="form">Enter with <span class="row gap"><input data-f="n" type="number" min="1" value="${e.n || 1}" style="width:70px"> extra <input data-f="counter" value="${esc(e.counter || '+1/+1')}" style="width:110px"> counter(s)</span></label>`;
     if (e.kind === 'keyword')
-      body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label><label class="form">Have <input data-f="keyword" value="${esc(e.keyword || '')}" placeholder="Flying, Trample, Haste…"></label>`;
+      body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label>${extra}<label class="form">Have <input data-f="keyword" value="${esc(e.keyword || '')}" placeholder="Flying, Trample, Haste…"></label>`;
     return body;
   }
 
@@ -1782,7 +2297,7 @@
       if (!el) return undefined;
       return el.type === 'checkbox' ? el.checked : el.value;
     };
-    return E.cleanEffects([{ kind, who: v('who'), filter: v('filter'), p: v('p'), t: v('t'), count: v('count'), where: v('where'), other: v('other'), n: v('n'), counter: v('counter'), keyword: v('keyword') }])[0];
+    return E.cleanEffects([{ kind, who: v('who'), filter: v('filter'), p: v('p'), t: v('t'), count: v('count'), where: v('where'), other: v('other'), n: v('n'), counter: v('counter'), keyword: v('keyword'), color: v('color'), mvOp: v('mvOp'), mv: v('mv') }])[0];
   }
 
   /** Build / edit one effect. Resolves with the effect or null. */
@@ -2015,7 +2530,20 @@
           const b = e.target.closest('button');
           if (!b) return;
           const saved = savedDecks();
-          if (b.dataset.use) load(saved[Number(b.dataset.use)]);
+          if (b.dataset.use) {
+            const d = saved[Number(b.dataset.use)];
+            if (d.cards.some((c) => c.cmc === undefined || c.colors === undefined)) {
+              b.disabled = true;
+              b.textContent = 'Updating card data…';
+              try {
+                await I.refreshTemplates(d.cards);
+                saveDecks(saved);
+              } catch (err) {
+                toast(`Couldn't update card data (${err.message}). Loading the deck anyway.`, 'error');
+              }
+            }
+            load(d);
+          }
           if (b.dataset.rename) {
             const d = saved[Number(b.dataset.rename)];
             const n = await askText('Rename deck', d.name, '', 'New name');
@@ -2191,6 +2719,9 @@
         <b>Your hand</b><span>Tap a card to see it. Drag it up to play it (lands go to the battlefield, everything else to the stack). Hold, then slide sideways to re-order.</span>
         <b>Battlefield</b><span>Drag to look around, pinch to zoom. Tap a land to tap it. Tap anything else for its options. Hold a card, then drag to move it. Hold and let go for the menu.</span>
         <b>Stack</b><span>Tap a spell on the stack for Resolves / Doesn't resolve.</span>
+        <b>Moving cards</b><span>While dragging, Graveyard / Exile / Hand / Library / Command targets appear at the sides of the screen.</span>
+        <b>Combat</b><span>Tap the Combat phase. Use ▲ ▼ ◀ ▶ to move between your battlefield, the combat zone(s) and opponents. Drag creatures to the top edge to attack (or block), or tap the combat zone.</span>
+        <b>Library</b><span>Tap it (in ☰ → My zones) for the menu, double-tap to draw.</span>
         <b>Menu ☰</b><span>Zones (library, graveyard, exile, command), opponents' battlefields, log, zoom, d20, tokens, proliferate, undo and settings.</span>
         <b>Phases</b><span>Tap the phases along the top as you go. Pass turn is at the end.</span>
       </div>`
@@ -2202,7 +2733,10 @@
         <b>Stack</b><span>Double-click to resolve. Right-click for Resolves / Doesn't resolve.</span>
         <b>Equipment &amp; auras</b><span>Drag one onto a creature to attach it (or right-click → Attach to…).</span>
         <b>Effects</b><span>Right-click → Effects… to set up what a card does (anthems, "for each" bonuses, extra counters, keywords). Totals update automatically.</span>
-        <b>Library</b><span>Click to draw (<kbd>D</kbd>). Right-click to search (type to filter), scry, mill, shuffle…</span>
+        <b>Library</b><span>Click for the menu (draw, mill, peek, reveal until…, search, shuffle). Double-click (or <kbd>D</kbd>) to draw.</span>
+        <b>Counters</b><span>Right-click a permanent → Counters…: type numbers or use ± and press Save (✕ throws changes away). Permanents with counters show them when right-clicked.</span>
+        <b>Combat</b><span>Click the Combat phase (or ⚔ Combat). Drag attackers into the combat box (onto the player or a planeswalker); defenders drag blockers onto a column. +X / ×N change a column's damage; everyone presses Done when ready.</span>
+        <b>Reactions</b><span>Hover a chat or log line and click ☺︎+.</span>
         <b>Opponents' stuff</b><span>Changing anything on another player's battlefield, hand, library or life asks them first.</span>
         <b>Battlefields</b><span>Wheel zooms, drag an empty spot to scroll. "All battlefields" shows everyone in turn order.</span>
         <b>d20</b><span>Click d20 to drop a die on your battlefield, then flick it (quick drag &amp; release). Click a rolled die to remove it.</span>
@@ -2409,7 +2943,7 @@
         const zone = t.dataset.zone;
         if (zone === 'hand' && !p.handRevealed && pid !== S.you) return toast(`${p.name}'s hand is hidden.`);
         if (zone === 'library') {
-          if (pid === S.you) return showMenu(libraryMenu(), e.clientX, e.clientY);
+          if (pid === S.you) return libraryClick(e.clientX, e.clientY);
           return showMenu(
             [
               { header: `${p.name}'s library (${p.libraryCount})` },
@@ -2436,7 +2970,7 @@
     if (e.target.closest('.card')) return; // handled by pointerup
     const slot = e.target.closest('[data-pile]');
     if (!slot) return;
-    if (slot.dataset.pile === 'library') act({ type: 'draw', n: 1 });
+    if (slot.dataset.pile === 'library') libraryClick(e.clientX, e.clientY);
     else openViewer(S.you, slot.dataset.pile);
   });
 
@@ -2497,6 +3031,7 @@
   $('#btn-token').addEventListener('click', () => tokenDialog(S.you));
   $('#btn-d20').addEventListener('click', () => act({ type: 'placeDie' }));
   $('#btn-prolif').addEventListener('click', startProliferate);
+  $('#btn-combat').addEventListener('click', () => act({ type: 'combatStart' }));
   $('#chat-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const i = $('#chat-input');
@@ -2562,7 +3097,8 @@
     openViewer, closeViewer, renderLog, startProliferate, startAttach, cancelMode, finishMode, modeClick,
     dieEl, animateDie, trackFlick, randomFlick, D20_SVG,
     leaveGame, copyInvite, startGameClick, playFromHand, resolveStack, isLandCard, handIndexAt, isEquipLike,
-    paneLayout, fitTray,
+    paneLayout, fitTray, fitView, viewCenter, cardsBox, openCounterPanel, closeCounterPanel, libraryClick, revealDialog,
+    combatInfo, combatColumnHTML, combatDrop, combatDefenders, cardHTML, DEFAULT_Z, combatClick, setCombatDef, currentCombatDef, switchCombatDef,
   };
   window.MTGUI = U;
 

@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <title>MTG Tabletop</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="css/style.css?v=3" />
+  <link rel="stylesheet" href="css/style.css?v=4" />
   <script>
     // If anything breaks, show a small message (with a close button) instead of a blank screen.
     window.addEventListener('error', function (e) {
@@ -27,8 +27,10 @@
         document.getElementById('fatal-reload').onclick = function () { location.reload(); };
         document.getElementById('fatal-lobby').onclick = function () { location.href = location.pathname; };
       }
-      document.getElementById('fatal-msg').textContent = 'Something went wrong: ' + (e.message || e) +
-        (e.filename ? '\n(' + e.filename.split('/').pop().split('?')[0] + ' line ' + e.lineno + ')' : '') +
+      // keep every error (the first one is usually the real cause)
+      window.__errs = window.__errs || [];
+      if (window.__errs.length < 5) window.__errs.push((e.message || e) + (e.filename ? ' (' + e.filename.split('/').pop().split('?')[0] + ' line ' + e.lineno + ')' : ''));
+      document.getElementById('fatal-msg').textContent = 'Something went wrong:\n• ' + window.__errs.join('\n• ') +
         '\n\nTry Reload. If it keeps happening, send this message to whoever made the site.';
     });
   </script>
@@ -122,9 +124,11 @@
           <button class="btn small" id="btn-token">+ Token</button>
           <button class="btn small" id="btn-d20">d20</button>
           <button class="btn small" id="btn-prolif">Proliferate</button>
+          <button class="btn small" id="btn-combat" hidden>⚔ Combat</button>
         </div>
       </section>
 
+      <section id="combat" class="combat" hidden></section>
       <section id="me-area" class="me-area"></section>
     </main>
 
@@ -155,10 +159,10 @@
   <div id="modal-root"></div>
   <div id="toasts" class="toasts"></div>
 
-  <script src="js/engine.js?v=3"></script>
-  <script src="js/importer.js?v=3"></script>
-  <script src="js/net.js?v=3"></script>
-  <script src="js/ui.js?v=3"></script>
-  <script src="js/phone.js?v=3"></script>
+  <script src="js/engine.js?v=4"></script>
+  <script src="js/importer.js?v=4"></script>
+  <script src="js/net.js?v=4"></script>
+  <script src="js/ui.js?v=4"></script>
+  <script src="js/phone.js?v=4"></script>
 </body>
 </html>

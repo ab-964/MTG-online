@@ -162,7 +162,9 @@
       backOracle: back ? back.oracle_text || '' : '',
       backPt: back ? ptOf(back) : null,
       backTypeLine: back ? back.type_line || '' : '',
-      loyalty: front.loyalty || null,
+      loyalty: front.loyalty || sc.loyalty || null,
+      cmc: Number.isFinite(sc.cmc) ? sc.cmc : null,
+      colors: Array.isArray(sc.colors) ? sc.colors : Array.isArray(front.colors) ? front.colors : [],
       qty: entry.qty,
       isCommander: !!entry.isCommander,
       name: backImgs && faces ? faces[0].name : sc.name,
@@ -374,6 +376,11 @@
             const filter = singular(m[2]);
             add({ kind: 'pt', who, filter, p: pm(m[3]), t: pm(m[4]) });
             for (const k of parseKeywords(m[5])) add({ kind: 'keyword', who, filter, keyword: k });
+          } else if ((m = /^(Other )?(White|Blue|Black|Red|Green|Colorless|Multicolored) creatures( you control)? get ([+-]\d+)\/([+-]\d+)(?: and have (.+))?$/.exec(s2))) {
+            const color = { White: 'W', Blue: 'U', Black: 'B', Red: 'R', Green: 'G', Colorless: 'C', Multicolored: 'M' }[m[2]];
+            const who = m[3] ? (m[1] ? 'yoursOther' : 'yours') : 'all';
+            add({ kind: 'pt', who, color, p: pm(m[4]), t: pm(m[5]) });
+            for (const k of parseKeywords(m[6])) add({ kind: 'keyword', who, color, keyword: k });
           } else if ((m = /^Creatures your opponents control get ([+-]\d+)\/([+-]\d+)$/.exec(s2))) {
             add({ kind: 'pt', who: 'opponents', p: pm(m[1]), t: pm(m[2]) });
           } else if ((m = /^All (?:([A-Z][\w'-]*) )?creatures get ([+-]\d+)\/([+-]\d+)$/.exec(s2))) {
@@ -412,7 +419,23 @@
     return { suggestions, unhandled };
   }
 
-  const api = { importDeck, searchTokens, getCard, parseText, archidektId, imageFromId, suggestEffects };
+  /** Fill in card data that older versions didn't save (mana value, colours, loyalty, rules text). */
+  async function refreshTemplates(cards) {
+    const need = cards.filter((c) => c.cmc === undefined || c.colors === undefined);
+    if (!need.length) return { cards, refreshed: 0 };
+    const entries = need.map((c) => ({ qty: c.qty, name: c.name, scryfallId: c.scryfallId, set: c.set, cn: c.cn, isCommander: c.isCommander }));
+    const res = await resolveWithScryfall(entries);
+    let refreshed = 0;
+    need.forEach((c, i) => {
+      const fresh = res.cards[i];
+      if (!fresh || fresh.cmc === undefined) return;
+      for (const k of ['cmc', 'colors', 'loyalty', 'oracle', 'backOracle', 'manaCost', 'backPt', 'backTypeLine', 'typeLine', 'pt']) if (fresh[k] !== undefined) c[k] = fresh[k];
+      refreshed++;
+    });
+    return { cards, refreshed };
+  }
+
+  const api = { refreshTemplates, importDeck, searchTokens, getCard, parseText, archidektId, imageFromId, suggestEffects };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MTGImporter = api;
 })(typeof window !== 'undefined' ? window : globalThis);

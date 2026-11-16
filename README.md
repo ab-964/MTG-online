@@ -9,6 +9,10 @@ A free, browser-based tabletop for playing **Magic: The Gathering** with up to 4
 - **Fair-play permission system.** Touching another player's battlefield, hand, library or life sends them an Allow / Deny request.
 - **Effects that do the maths.** Set up what cards do (anthems, equipment, "+1/+0 for each artifact", "enters with an extra counter", keywords). Power/toughness totals then update by themselves. A helper reads your cards' text when you import and suggests effects for you to approve.
 - **Undo**, a **flickable d20** (and a dice-off for turn order), **mulligans**, **proliferate**, **counters**, **equipment & auras**, **tokens**, **commander damage & tax**, **chat** and a **game log**.
+- **Combat zone**: drag attackers in (at players or planeswalkers), defenders drag in blockers, each column shows the damage it would deal (double strike, +X and ×N included, in the order you choose), and everyone presses Done.
+- **A big free battlefield**: put cards anywhere; new cards land in the middle of your screen; **Fit** shows everything.
+- **Reveal until…**, a tidy library menu (click for the menu, double-click to draw), and a little shuffle animation.
+- **Emoji reactions** on chat and log lines: 😠 😂 🖕 😭 😨 💀
 - **Rules aren't enforced.** Like a real table, you're in charge. Every card links to its Scryfall page for rulings.
 
 👉 **New here? Follow [docs/SETUP.md](docs/SETUP.md)** to put it on GitHub Pages (one time) and see what to do each time you play.

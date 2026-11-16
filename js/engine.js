@@ -26,15 +26,17 @@ function randomHex(bytes) {
 
 const PHASES = ['Untap', 'Upkeep', 'Draw', 'Main 1', 'Combat', 'Main 2', 'End'];
 const PLAYER_ZONES = ['library', 'hand', 'graveyard', 'exile', 'command', 'battlefield'];
-const PUBLIC_ZONES = new Set(['graveyard', 'exile', 'command', 'battlefield', 'stack']);
+const PUBLIC_ZONES = new Set(['graveyard', 'exile', 'command', 'battlefield', 'stack', 'reveal']);
 const COLORS = ['#e05252', '#4f8fe0', '#4caf6a', '#d6a531'];
 const MAX_PLAYERS = 4;
 const MAX_DECK_CARDS = 300;
-const TABLE_W = 1600;
-const TABLE_H = 700;
+const TABLE_W = 6000; // a big, limited plane: put cards anywhere
+const TABLE_H = 4000;
+const PLANE_V = 3;
 const CARD_W = 100;
 const CARD_H = 140;
 const LOG_LIMIT = 400;
+const REACTIONS = ['😠', '😂', '🖕', '😭', '😨', '💀'];
 
 const rid = (bytes = 6) => randomHex(bytes);
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -45,6 +47,12 @@ class GameError extends Error {}
 const fail = (msg) => { throw new GameError(msg); };
 
 /* ---------------------------------------------------------------- helpers */
+
+/** Shuffle a player's library and bump a counter so everyone sees the shuffle animation. */
+function shuffleLibrary(p) {
+  shuffle(p.zones.library);
+  p.shuffleSeq = (p.shuffleSeq || 0) + 1;
+}
 
 function shuffle(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
@@ -89,9 +97,10 @@ const sign = (n) => (n >= 0 ? `+${n}` : `${n}`);
  * Deterministic dice physics so every player sees the same bounce.
  * Units are "table units"; returns frames [[x, y, rotationDeg], ...] at 60 fps.
  */
-function simulateDie(sx, sy, vx, vy, W, H, size = 70) {
-  let x = sx;
-  let y = sy;
+function simulateDie(sx, sy, vx, vy, W, H, size = 70, x0 = 0, y0 = 0) {
+  // work in region-local coordinates, convert back when recording frames
+  let x = sx - x0;
+  let y = sy - y0;
   let sp = Math.hypot(vx, vy);
   if (sp < 1) { vx = 400; vy = -300; sp = 500; }
   if (sp < 450) { vx *= 450 / sp; vy *= 450 / sp; }
@@ -110,10 +119,16 @@ function simulateDie(sx, sy, vx, vy, W, H, size = 70) {
     y = Math.max(0, Math.min(H - size, y));
     vx *= 0.962; vy *= 0.962; vr *= 0.955;
     rot += vr / 60;
-    frames.push([Math.round(x * 10) / 10, Math.round(y * 10) / 10, Math.round(rot * 10) / 10]);
+    frames.push([Math.round((x + x0) * 10) / 10, Math.round((y + y0) * 10) / 10, Math.round(rot * 10) / 10]);
     if (i > 40 && Math.hypot(vx, vy) < 12) break;
   }
   return frames;
+}
+/** The patch of battlefield a die bounces around in (so it doesn't fly across the whole plane). */
+function dieRegion(x, y) {
+  const w = 900;
+  const h = 560;
+  return { x0: Math.max(0, Math.min(TABLE_W - w, x - w / 2)), y0: Math.max(0, Math.min(TABLE_H - h, y - h / 2)), w, h };
 }
 const TRAY_W = 900;
 const TRAY_H = 420;
@@ -153,6 +168,9 @@ function createGame({ name, format } = {}) {
     setup: null, // opening mulligan / roll-for-turn-order state
     dice: {}, // d20s sitting on battlefields
     requests: [], // permission requests waiting for an answer
+    combat: null, // current combat (attackers, blockers, damage modifiers)
+    reveal: null, // cards being revealed by "reveal until"
+    planeV: PLANE_V,
     nextSeq: 1,
     log: [],
     nextLogId: 1,
@@ -213,6 +231,9 @@ function cleanTemplate(t) {
     typeLine: str(t.typeLine, 150),
     pt: str(t.pt, 12) || null,
     backPt: str(t.backPt, 12) || null,
+    loyalty: str(t.loyalty == null ? '' : String(t.loyalty), 6) || null,
+    cmc: Number.isFinite(Number(t.cmc)) && t.cmc !== null && t.cmc !== '' ? Number(t.cmc) : null,
+    colors: Array.isArray(t.colors) ? t.colors.filter((c) => 'WUBRG'.includes(c)).slice(0, 5) : null,
     backTypeLine: str(t.backTypeLine, 150),
     manaCost: str(t.manaCost, 60),
     oracle: str(t.oracle, 1500),
@@ -230,6 +251,30 @@ function cleanTemplate(t) {
 }
 
 const WHO = ['self', 'attached', 'yours', 'yoursOther', 'opponents', 'all'];
+const COLOR_FILTERS = ['W', 'U', 'B', 'R', 'G', 'C', 'M'];
+const COLOR_WORD = { W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green', C: 'colorless', M: 'multicolored' };
+
+/** Colour / mana value filters on an effect. */
+function matchesExtra(card, e) {
+  if (e.color) {
+    const cols = Array.isArray(card.colors) ? card.colors : null;
+    if (!cols) return false;
+    if (e.color === 'C' && cols.length) return false;
+    if (e.color === 'M' && cols.length < 2) return false;
+    if ('WUBRG'.includes(e.color) && !cols.includes(e.color)) return false;
+  }
+  if (e.mvOp) {
+    if (card.cmc == null) return false;
+    if (e.mvOp === '<=' && !(card.cmc <= e.mv)) return false;
+    if (e.mvOp === '=' && card.cmc !== e.mv) return false;
+    if (e.mvOp === '>=' && !(card.cmc >= e.mv)) return false;
+  }
+  return true;
+}
+function extraText(e) {
+  const mv = e.mvOp ? ` with mana value ${e.mvOp === '<=' ? `${e.mv} or less` : e.mvOp === '>=' ? `${e.mv} or greater` : e.mv}` : '';
+  return { color: e.color ? `${COLOR_WORD[e.color]} ` : '', mv };
+}
 const WHERE = ['you', 'opp', 'all', 'yourGraveyard'];
 const KINDS = ['pt', 'forEach', 'etb', 'keyword'];
 
@@ -243,6 +288,11 @@ function cleanEffects(list) {
     if (e.kind === 'pt' || e.kind === 'etb' || e.kind === 'keyword') {
       eff.who = WHO.includes(e.who) ? e.who : 'self';
       eff.filter = str(String(e.filter || '').trim(), 30);
+    }
+    if (COLOR_FILTERS.includes(e.color)) eff.color = e.color;
+    if (['<=', '=', '>='].includes(e.mvOp) && e.mv !== '' && e.mv !== null && e.mv !== undefined && Number.isFinite(Number(e.mv))) {
+      eff.mvOp = e.mvOp;
+      eff.mv = int(e.mv, 0, 20, 0);
     }
     if (e.kind === 'pt' || e.kind === 'forEach') {
       eff.p = int(e.p, -99, 99, 0);
@@ -280,7 +330,8 @@ function describeEffect(e) {
   const who = () => {
     if (e.who === 'self' || e.who === 'attached' || !WHO_TEXT[e.who]) return WHO_TEXT[e.who] || 'This creature';
     const [pre, rest] = { yours: ['', 'creatures you control'], yoursOther: ['other ', 'creatures you control'], opponents: ['', 'creatures your opponents control'], all: ['all ', 'creatures'] }[e.who];
-    const out = `${pre}${e.filter ? `${e.filter} ` : ''}${rest}`;
+    const x = extraText(e);
+    const out = `${pre}${x.color}${e.filter ? `${e.filter} ` : ''}${rest}${x.mv}`;
     return out[0].toUpperCase() + out.slice(1);
   };
   const plural = e.who !== 'self' && e.who !== 'attached';
@@ -288,7 +339,7 @@ function describeEffect(e) {
     case 'pt':
       return `${who()} ${plural ? 'get' : 'gets'} ${sign(e.p)}/${sign(e.t)}`;
     case 'forEach':
-      return `This creature gets ${sign(e.p)}/${sign(e.t)} for each ${e.other ? 'other ' : ''}${e.count} ${WHERE_TEXT[e.where]}`;
+      return `This creature gets ${sign(e.p)}/${sign(e.t)} for each ${e.other ? 'other ' : ''}${extraText(e).color}${e.count}${extraText(e).mv} ${WHERE_TEXT[e.where]}`;
     case 'etb':
       return `${who()} ${plural ? 'enter' : 'enters'} with ${e.n} extra ${e.counter} counter${e.n === 1 ? '' : 's'}`;
     case 'keyword':
@@ -313,6 +364,9 @@ function instantiate(game, tpl, ownerId, extra = {}) {
     typeLine: tpl.typeLine || '',
     pt: tpl.pt || null,
     backPt: tpl.backPt || null,
+    loyalty: tpl.loyalty || null,
+    cmc: tpl.cmc == null ? null : tpl.cmc,
+    colors: tpl.colors || null,
     backTypeLine: tpl.backTypeLine || '',
     manaCost: tpl.manaCost || '',
     oracle: tpl.oracle || '',
@@ -341,6 +395,7 @@ function instantiate(game, tpl, ownerId, extra = {}) {
 
 function zoneArray(game, zone, pid) {
   if (zone === 'stack') return game.stack;
+  if (zone === 'reveal') return game.reveal ? game.reveal.ids : null;
   const p = getPlayer(game, pid);
   return p ? p.zones[zone] : null;
 }
@@ -416,22 +471,42 @@ function addCounter(card, name, delta) {
   return v;
 }
 
-function autoPlace(game, pid, card) {
+/** Put a card at (or near) the hint point, avoiding other cards. Hint = centre of the placer's screen. */
+function autoPlace(game, pid, card, hint) {
   const p = getPlayer(game, pid);
   const others = p.zones.battlefield.map((id) => game.cards[id]).filter((c) => c && c.id !== card.id);
-  let y = isLand(card) ? 530 : isCreature(card) ? 30 : 280;
-  for (let pass = 0; pass < 6; pass++) {
-    for (let x = 30; x <= TABLE_W - CARD_W - 20; x += 115) {
-      if (!others.some((o) => Math.abs(o.x - x) < 70 && Math.abs(o.y - y) < 70)) {
+  let cx;
+  let cy;
+  if (hint && Number.isFinite(Number(hint.x)) && Number.isFinite(Number(hint.y))) {
+    cx = Number(hint.x) - CARD_W / 2;
+    cy = Number(hint.y) - CARD_H / 2;
+  } else if (others.length) {
+    cx = others.reduce((s, c) => s + c.x, 0) / others.length;
+    cy = others.reduce((s, c) => s + c.y, 0) / others.length;
+  } else {
+    cx = TABLE_W / 2 - CARD_W / 2;
+    cy = TABLE_H / 2 - CARD_H / 2;
+  }
+  const free = (x, y) => !others.some((o) => Math.abs(o.x - x) < 85 && Math.abs(o.y - y) < 115);
+  const clampX = (x) => Math.max(0, Math.min(TABLE_W - CARD_W, x));
+  const clampY = (y) => Math.max(0, Math.min(TABLE_H - CARD_H, y));
+  for (let r = 0; r < 25; r++) {
+    // spots in this ring, nearest-row first so cards line up side by side
+    const ring = [];
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) if (Math.max(Math.abs(dx), Math.abs(dy)) === r) ring.push([dx, dy]);
+    ring.sort((a, b) => Math.abs(a[1]) - Math.abs(b[1]) || Math.abs(a[0]) - Math.abs(b[0]) || b[0] - a[0]);
+    for (const [dx, dy] of ring) {
+      const x = clampX(cx + dx * 112);
+      const y = clampY(cy + dy * 152);
+      if (free(x, y)) {
         card.x = x;
         card.y = y;
         return;
       }
     }
-    y = Math.min(TABLE_H - CARD_H, y + 40);
   }
-  card.x = 30 + Math.floor(Math.random() * 400);
-  card.y = 300 + Math.floor(Math.random() * 300);
+  card.x = clampX(cx + 20);
+  card.y = clampY(cy + 20);
 }
 
 function resetCardState(card) {
@@ -473,7 +548,8 @@ function effectHits(game, e, src, t) {
     default:
       return false;
   }
-  return !e.filter || e.who === 'self' || e.who === 'attached' ? true : hasType(t, e.filter);
+  if (e.who === 'self' || e.who === 'attached') return true;
+  return (!e.filter || hasType(t, e.filter)) && matchesExtra(t, e);
 }
 
 function effectSources(game) {
@@ -505,7 +581,7 @@ function countFor(game, e, src) {
   let n = 0;
   if (e.where === 'yourGraveyard') {
     const p = getPlayer(game, src.zp);
-    for (const id of p ? p.zones.graveyard : []) if (hasType(game.cards[id], e.count)) n++;
+    for (const id of p ? p.zones.graveyard : []) if (hasType(game.cards[id], e.count) && matchesExtra(game.cards[id], e)) n++;
     return n;
   }
   for (const p of game.players) {
@@ -515,7 +591,7 @@ function countFor(game, e, src) {
       const c = game.cards[id];
       if (!c || c.faceDown) continue;
       if (e.other && c.id === src.id) continue;
-      if (hasType(c, e.count)) n++;
+      if (hasType(c, e.count) && matchesExtra(c, e)) n++;
     }
   }
   return n;
@@ -622,10 +698,13 @@ function moveCard(game, actor, a, { quiet = false } = {}) {
       card.x = num(a.x, 0, TABLE_W - CARD_W, 0);
       card.y = num(a.y, 0, TABLE_H - CARD_H, 0);
     } else if (!sameBattlefield) {
-      autoPlace(game, destP, card);
+      autoPlace(game, destP, card, a.hint);
     }
   }
   placeIn(game, card, to, destP, { pos: a.pos });
+  if (fromZone === 'battlefield' && (to !== 'battlefield' || fromP !== destP)) leaveCombat(game, card.id);
+  if (to === 'battlefield' && fromZone !== 'battlefield' && !card.faceDown && /\bPlaneswalker\b/.test(currentType(card)) && card.loyalty && /^\d+$/.test(card.loyalty) && !card.counters.loyalty)
+    card.counters.loyalty = Number(card.loyalty);
   const etb = to === 'battlefield' && fromZone !== 'battlefield' ? applyEtbEffects(game, card) : [];
 
   if (!quiet) {
@@ -652,7 +731,7 @@ function buildDeck(game, player) {
       placeIn(game, c, tpl.isCommander ? 'command' : 'library', player.id, { pos: 'bottom' });
     }
   }
-  shuffle(player.zones.library);
+  shuffleLibrary(player);
 }
 
 function drawCards(game, player, n) {
@@ -714,14 +793,115 @@ function resolveTurnOrder(game) {
   game.order = sorted.concat(game.players.map((p) => p.id).filter((id) => !sorted.includes(id)));
   game.turn = { active: sorted[0], number: 1, phase: 1 };
   st.stage = 'done';
+  // Rule 103.8: only in a two-player game does the starting player skip their first draw.
+  const first = getPlayer(game, sorted[0]);
+  if (game.settings.autoDraw && game.players.length >= 3 && first && drawCards(game, first, 1)) {
+    addLog(game, `${first.name} drew for the turn (in games of 3+ players the first player still draws).`);
+    game.turn.phase = 3;
+  }
   addLog(game, `Turn order: ${game.order.map((id) => getPlayer(game, id).name).join(' → ')}. ${getPlayer(game, sorted[0]).name} goes first!`, {
     kind: 'turn',
   });
 }
 
+/* ------------------------------------------------------------ keywords */
+
+const KEYWORD_LIST = ['flying', 'first strike', 'double strike', 'deathtouch', 'haste', 'hexproof', 'indestructible', 'lifelink', 'menace', 'reach', 'trample', 'vigilance', 'defender', 'flash', 'infect', 'shroud', 'prowess', 'wither'];
+
+/** Keywords printed on the card (lines like "Flying, vigilance") plus ones granted by effects. */
+function cardKeywords(game, card, stats) {
+  const out = new Set();
+  const text = card.flipped && card.backOracle ? card.backOracle : card.oracle || '';
+  for (const line of text.split('\n')) {
+    const parts = line.replace(/\([^)]*\)/g, '').split(',').map((x) => x.trim().toLowerCase().replace(/\.$/, ''));
+    if (parts.length && parts.every((p) => KEYWORD_LIST.includes(p) || /^(ward|protection from|equip|enchant)\b/.test(p))) for (const p of parts) out.add(p);
+  }
+  const st = (stats || computeStats(game))[card.id];
+  if (st) for (const k of st.keywords) out.add(String(k.keyword).toLowerCase());
+  return out;
+}
+
+/* -------------------------------------------------------------- combat */
+
+function combatParticipants(game) {
+  const cb = game.combat;
+  if (!cb) return [];
+  const ids = new Set([cb.attacker]);
+  for (const at of cb.attacks) {
+    if (at.target.kind === 'player') ids.add(at.target.id);
+    else {
+      const pw = game.cards[at.target.id];
+      if (pw && pw.zp) ids.add(pw.zp);
+    }
+  }
+  return [...ids].filter((id) => getPlayer(game, id));
+}
+
+/** Who defends this attack: the attacked player, or the planeswalker's controller. */
+function defenderOf(game, at) {
+  if (at.target.kind === 'player') return at.target.id;
+  const pw = game.cards[at.target.id];
+  return pw ? pw.zp : null;
+}
+
+function leaveCombat(game, cardId) {
+  const cb = game.combat;
+  if (!cb) return;
+  cb.attacks = cb.attacks.filter((at) => at.cardId !== cardId && !(at.target.kind === 'pw' && at.target.id === cardId));
+  for (const at of cb.attacks) at.blockers = at.blockers.filter((b) => b !== cardId);
+}
+
+function combatChanged(game) {
+  if (game.combat) game.combat.done = {};
+}
+
+/** "If it connects" damage: power (with bonuses), doubled for double strike, then the column's +X / ×N in order. */
+function attackDamage(game, at, stats) {
+  const c = game.cards[at.cardId];
+  if (!c) return null;
+  const st = stats[c.id];
+  let p = null;
+  if (st && st.total) {
+    const v = st.total.split('/')[0];
+    p = /^-?\d+$/.test(v) ? Number(v) : null;
+  } else {
+    const b = parsePT(c.flipped && c.backPt ? c.backPt : c.pt);
+    p = b ? b.p : null;
+  }
+  if (p == null) return null;
+  let dmg = Math.max(0, p);
+  if (cardKeywords(game, c, stats).has('double strike')) dmg *= 2;
+  for (const m of at.mods) dmg = m.op === 'x' ? dmg * m.n : dmg + m.n;
+  return Math.max(0, dmg);
+}
+
+function endCombat(game, actor) {
+  const cb = game.combat;
+  const stats = computeStats(game);
+  const tapped = [];
+  for (const at of cb.attacks) {
+    const c = game.cards[at.cardId];
+    if (!c || c.zone !== 'battlefield') continue;
+    if (!cardKeywords(game, c, stats).has('vigilance')) {
+      c.tapped = true;
+      tapped.push(c.name);
+    }
+  }
+  const lines = cb.attacks.map((at) => {
+    const c = game.cards[at.cardId];
+    const tgt = at.target.kind === 'player' ? (getPlayer(game, at.target.id) || {}).name : (game.cards[at.target.id] || {}).name;
+    const blk = at.blockers.map((b) => (game.cards[b] || {}).name).filter(Boolean);
+    const d = attackDamage(game, at, stats);
+    return `${c ? c.name : '?'} → ${tgt || '?'}${blk.length ? ` (blocked by ${blk.join(', ')})` : ' (unblocked)'}${d == null ? '' : `, ${d} dmg`}`;
+  });
+  addLog(game, `Combat done. ${lines.join('; ') || 'No attackers.'}`, { kind: 'turn' });
+  game.combat = null;
+  if (game.turn.phase === 4) game.turn.phase = 5;
+}
+
 /* ------------------------------------------------------------ permission */
 
-const UNDO_BARRIERS = new Set(['shuffle', 'mulligan', 'startGame', 'rollInitiative', 'rollDie', 'roll', 'coin']);
+const UNDO_BARRIERS = new Set(['shuffle', 'mulligan', 'startGame', 'rollInitiative', 'rollDie', 'roll', 'coin', 'revealUntil', 'resolveReveal']);
 
 /** Returns the id of the player who must approve this action, or null. */
 function needsPermission(game, actor, a) {
@@ -928,7 +1108,7 @@ function applyAction(game, actor, a, opts = {}) {
     }
 
     case 'shuffle':
-      shuffle(actor.zones.library);
+      shuffleLibrary(actor);
       addLog(game, `${actor.name} shuffled their library.`);
       break;
 
@@ -940,7 +1120,7 @@ function applyAction(game, actor, a, opts = {}) {
         detach(game, c);
         placeIn(game, c, 'library', actor.id);
       }
-      shuffle(actor.zones.library);
+      shuffleLibrary(actor);
       drawCards(game, actor, 7);
       if (st && st.stage === 'mulligan') {
         st.mulls[actor.id] = (st.mulls[actor.id] || 0) + 1;
@@ -993,7 +1173,9 @@ function applyAction(game, actor, a, opts = {}) {
       const mine = Object.values(game.dice).filter((d) => d.owner === actor.id);
       if (mine.length >= 3) fail('You already have 3 dice out. Tap one to remove it.');
       const id = rid(3);
-      game.dice[id] = { id, owner: actor.id, x: TABLE_W / 2 - 35 + mine.length * 90, y: TABLE_H / 2 - 35, value: null, seq: 0 };
+      const hx = a.hint && Number.isFinite(Number(a.hint.x)) ? Number(a.hint.x) : TABLE_W / 2;
+      const hy = a.hint && Number.isFinite(Number(a.hint.y)) ? Number(a.hint.y) : TABLE_H / 2;
+      game.dice[id] = { id, owner: actor.id, x: num(hx - 35 + mine.length * 90, 0, TABLE_W - 70, 0), y: num(hy - 35, 0, TABLE_H - 70, 0), value: null, seq: 0 };
       break;
     }
 
@@ -1004,7 +1186,9 @@ function applyAction(game, actor, a, opts = {}) {
         d.x = num(a.x, 0, TABLE_W - 70, d.x);
         d.y = num(a.y, 0, TABLE_H - 70, d.y);
       }
-      const frames = simulateDie(d.x, d.y, num(a.vx, -6000, 6000, 600), num(a.vy, -6000, 6000, -600), TABLE_W, TABLE_H);
+      const reg = dieRegion(d.x, d.y);
+      Object.assign(d, { rx: reg.x0, ry: reg.y0, rw: reg.w, rh: reg.h });
+      const frames = simulateDie(d.x, d.y, num(a.vx, -6000, 6000, 600), num(a.vy, -6000, 6000, -600), reg.w, reg.h, 70, reg.x0, reg.y0);
       d.sx = d.x;
       d.sy = d.y;
       d.vx = num(a.vx, -6000, 6000, 600);
@@ -1065,9 +1249,8 @@ function applyAction(game, actor, a, opts = {}) {
       const t = game.cards[c.attachedTo];
       c.attachedTo = null;
       if (t && t.zp === c.zp) {
-        c.x = Math.min(TABLE_W - CARD_W, t.x + 120);
-        c.y = t.y;
-      } else autoPlace(game, c.zp, c);
+        autoPlace(game, c.zp, c, { x: t.x + 170, y: t.y + 70 });
+      } else autoPlace(game, c.zp, c, a.hint);
       addLog(game, `${actor.name} unattached ${c.name}.`);
       break;
     }
@@ -1098,6 +1281,213 @@ function applyAction(game, actor, a, opts = {}) {
       detach(game, c);
       placeIn(game, c, 'hand', actor.id, { pos: int(a.index, 0, 200, 0) });
       return { quiet: true };
+    }
+
+    case 'react': {
+      const entry = game.log.find((e) => e.id === Number(a.logId));
+      if (!entry) fail('That message is too old to react to.');
+      if (!REACTIONS.includes(a.emoji)) fail('Unknown reaction.');
+      entry.reactions = entry.reactions || {};
+      const list = entry.reactions[a.emoji] || [];
+      const i = list.indexOf(actor.id);
+      if (i >= 0) list.splice(i, 1);
+      else list.push(actor.id);
+      if (list.length) entry.reactions[a.emoji] = list;
+      else delete entry.reactions[a.emoji];
+      return { quiet: true };
+    }
+
+    case 'setCounters': {
+      const c = needCard(game, a.cardId);
+      const want = {};
+      for (const [k, v] of Object.entries(a.counters || {}).slice(0, 30)) {
+        const name = str(String(k).trim(), 20);
+        const n = int(v, -999, 999, 0);
+        if (name && n) want[name] = (want[name] || 0) + n;
+      }
+      // +1/+1 and -1/-1 cancel out
+      const net = (want['+1/+1'] || 0) - (want['-1/-1'] || 0);
+      delete want['+1/+1'];
+      delete want['-1/-1'];
+      if (net > 0) want['+1/+1'] = net;
+      if (net < 0) want['-1/-1'] = -net;
+      for (const k of Object.keys(want)) if (want[k] <= 0) delete want[k];
+      const before = c.counters;
+      c.counters = want;
+      const keys = [...new Set([...Object.keys(before), ...Object.keys(want)])];
+      const changed = keys.filter((k) => (before[k] || 0) !== (want[k] || 0));
+      if (!changed.length) return { noChange: true };
+      const nm = c.faceDown ? 'a face-down card' : c.name;
+      const desc = Object.entries(want).map(([k, v]) => (k === '+1/+1' ? `+${v}/+${v}` : k === '-1/-1' ? `-${v}/-${v}` : `${v} ${k}`));
+      addLog(game, `${actor.name} set the counters on ${nm}: ${desc.join(', ') || 'none'}.`);
+      break;
+    }
+
+    case 'revealUntil': {
+      if (game.reveal) fail('Finish the current reveal first.');
+      const crit = {
+        type: str(String(a.typeWord || '').trim(), 30),
+        color: COLOR_FILTERS.includes(a.color) ? a.color : '',
+        mvOp: ['<=', '=', '>='].includes(a.mvOp) ? a.mvOp : '',
+        mv: int(a.mv, 0, 20, 0),
+      };
+      if (!crit.type && !crit.color && !crit.mvOp) fail('Choose at least one thing to stop at.');
+      const ids = [];
+      let found = null;
+      while (actor.zones.library.length) {
+        const c = game.cards[actor.zones.library[0]];
+        detach(game, c);
+        ids.push(c.id);
+        c.zone = 'reveal';
+        c.zp = actor.id;
+        const e = { color: crit.color, mvOp: crit.mvOp, mv: crit.mv };
+        if ((!crit.type || hasType(c, crit.type) || c.name.toLowerCase().includes(crit.type.toLowerCase())) && matchesExtra(c, e)) {
+          found = c.id;
+          break;
+        }
+      }
+      const parts = [crit.type && `"${crit.type}"`, crit.color && COLOR_WORD[crit.color], crit.mvOp && `mana value ${crit.mvOp} ${crit.mv}`].filter(Boolean);
+      game.reveal = { pid: actor.id, ids, found, crit: parts.join(', ') };
+      const f = found && game.cards[found];
+      addLog(game, `${actor.name} revealed cards until ${parts.join(', ')}: ${ids.length} card${ids.length === 1 ? '' : 's'} revealed${f ? `, found ${f.name}` : ', nothing matched'}.`);
+      break;
+    }
+
+    case 'resolveReveal': {
+      const rv = game.reveal || fail('Nothing is being revealed.');
+      if (rv.pid !== actor.id) fail('Only the player who revealed can decide.');
+      const rest = rv.ids.filter((id) => id !== rv.found);
+      const put = (id, zone, pos) => {
+        const c = game.cards[id];
+        c.zone = null;
+        c.zp = null;
+        if (zone === 'battlefield') autoPlace(game, actor.id, c, a.hint);
+        placeIn(game, c, zone, actor.id, { pos });
+      };
+      if (a.rest === 'bottom') shuffle(rest);
+      for (const id of rest) put(id, a.rest === 'graveyard' ? 'graveyard' : a.rest === 'exile' ? 'exile' : 'library', 'bottom');
+      if (rv.found) {
+        const where = ['hand', 'battlefield', 'top'].includes(a.found) ? a.found : 'hand';
+        put(rv.found, where === 'top' ? 'library' : where, where === 'top' ? 'top' : undefined);
+      }
+      const f = rv.found && game.cards[rv.found];
+      addLog(game, `${actor.name}: ${f ? `${f.name} went to ${a.found === 'top' ? 'the top of their library' : `their ${a.found || 'hand'}`}, ` : ''}${rest.length} other card${rest.length === 1 ? '' : 's'} went to ${a.rest === 'bottom' ? 'the bottom in a random order' : `their ${a.rest}`}.`);
+      game.reveal = null;
+      break;
+    }
+
+    case 'combatStart': {
+      if (game.turn.active !== actor.id) fail('Only the player whose turn it is can start combat.');
+      if (!game.combat) {
+        game.combat = { attacker: actor.id, attacks: [], done: {} };
+        game.turn.phase = 4;
+        addLog(game, `${actor.name} began combat.`, { kind: 'turn' });
+      }
+      break;
+    }
+
+    case 'declareAttack': {
+      const cb = game.combat || fail('Combat hasn\'t started.');
+      if (cb.attacker !== actor.id) fail('Only the attacking player declares attackers.');
+      const c = needCard(game, a.cardId);
+      if (c.zone !== 'battlefield' || c.zp !== actor.id) fail('Attack with creatures you control.');
+      let target;
+      if (a.target && a.target.kind === 'pw') {
+        const pw = needCard(game, a.target.id);
+        if (pw.zone !== 'battlefield' || pw.zp === actor.id) fail('Attack an opponent\'s planeswalker or battle.');
+        target = { kind: 'pw', id: pw.id };
+      } else {
+        const p = needPlayer(game, a.target && a.target.id);
+        if (p.id === actor.id) fail("You can't attack yourself.");
+        target = { kind: 'player', id: p.id };
+      }
+      let at = cb.attacks.find((x) => x.cardId === c.id);
+      if (at) at.target = target;
+      else {
+        at = { id: rid(3), cardId: c.id, target, blockers: [], mods: [] };
+        cb.attacks.push(at);
+        for (const other of cb.attacks) other.blockers = other.blockers.filter((b) => b !== c.id);
+      }
+      combatChanged(game);
+      return { quiet: true };
+    }
+
+    case 'removeAttack': {
+      const cb = game.combat || fail('No combat.');
+      const at = cb.attacks.find((x) => x.id === a.attackId || x.cardId === a.cardId);
+      if (!at) break;
+      if (cb.attacker !== actor.id) fail('Only the attacking player can remove attackers.');
+      cb.attacks.splice(cb.attacks.indexOf(at), 1);
+      combatChanged(game);
+      return { quiet: true };
+    }
+
+    case 'block': {
+      const cb = game.combat || fail('No combat.');
+      const at = cb.attacks.find((x) => x.id === a.attackId) || fail('That attacker is gone.');
+      if (defenderOf(game, at) !== actor.id) fail('Only the defending player can block that attacker.');
+      const c = needCard(game, a.cardId);
+      if (c.zone !== 'battlefield' || c.zp !== actor.id) fail('Block with creatures you control.');
+      for (const other of cb.attacks) other.blockers = other.blockers.filter((b) => b !== c.id);
+      at.blockers.push(c.id);
+      combatChanged(game);
+      return { quiet: true };
+    }
+
+    case 'unblock': {
+      const cb = game.combat || fail('No combat.');
+      const c = needCard(game, a.cardId);
+      if (c.zp !== actor.id) fail('Only the blocking player can remove a blocker.');
+      for (const at of cb.attacks) at.blockers = at.blockers.filter((b) => b !== c.id);
+      combatChanged(game);
+      return { quiet: true };
+    }
+
+    case 'orderBlockers': {
+      const cb = game.combat || fail('No combat.');
+      const at = cb.attacks.find((x) => x.id === a.attackId) || fail('That attacker is gone.');
+      if (cb.attacker !== actor.id && defenderOf(game, at) !== actor.id) fail('Not your combat.');
+      const order = Array.isArray(a.order) ? a.order.filter((id) => at.blockers.includes(id)) : [];
+      if (order.length === at.blockers.length) at.blockers = order;
+      combatChanged(game);
+      return { quiet: true };
+    }
+
+    case 'combatMod': {
+      const cb = game.combat || fail('No combat.');
+      const at = cb.attacks.find((x) => x.id === a.attackId) || fail('That attacker is gone.');
+      if (cb.attacker !== actor.id && defenderOf(game, at) !== actor.id) fail('Not your combat.');
+      if (a.op === 'reset') at.mods = [];
+      else if (a.op === 'x' || a.op === '+') {
+        if (cb.attacker !== actor.id) fail('The attacker adds damage changes; the defender can re-order them.');
+        if (at.mods.length >= 8) fail('That is a lot of modifiers!');
+        at.mods.push({ op: a.op, n: a.op === 'x' ? int(a.n, 0, 10, 2) : int(a.n, -99, 99, 1) });
+      } else if (a.op === 'remove') at.mods.splice(int(a.index, 0, 20, 0), 1);
+      else if (a.op === 'move') {
+        const i = int(a.index, 0, 20, 0);
+        const j = i + (a.dir === 'left' ? -1 : 1);
+        if (j >= 0 && j < at.mods.length) [at.mods[i], at.mods[j]] = [at.mods[j], at.mods[i]];
+      }
+      combatChanged(game);
+      return { quiet: true };
+    }
+
+    case 'combatDone': {
+      const cb = game.combat || fail('No combat.');
+      const parts = combatParticipants(game);
+      if (!parts.includes(actor.id)) fail("You're not in this combat.");
+      if (a.value === false) delete cb.done[actor.id];
+      else cb.done[actor.id] = true;
+      if (parts.every((id) => cb.done[id])) endCombat(game, actor);
+      return { quiet: true };
+    }
+
+    case 'combatCancel': {
+      const cb = game.combat || fail('No combat.');
+      if (cb.attacker !== actor.id) fail('Only the attacking player can cancel combat.');
+      game.combat = null;
+      addLog(game, `${actor.name} cancelled combat.`, { kind: 'turn' });
+      break;
     }
 
     case 'respond': {
@@ -1133,7 +1523,7 @@ function applyAction(game, actor, a, opts = {}) {
       if (!['library', 'graveyard', 'exile', 'hand'].includes(a.to) || a.to === from) fail('Bad destination.');
       const ids = actor.zones[from].slice();
       for (const id of ids) moveCard(game, actor, { cardId: id, to: a.to, pos: 'bottom' }, { quiet: true });
-      if (a.to === 'library' && a.shuffle !== false) shuffle(actor.zones.library);
+      if (a.to === 'library' && a.shuffle !== false) shuffleLibrary(actor);
       addLog(game, `${actor.name} moved all ${ids.length} cards from their ${from} to their ${a.to}${a.to === 'library' ? ' and shuffled' : ''}.`);
       break;
     }
@@ -1230,7 +1620,7 @@ function applyAction(game, actor, a, opts = {}) {
       if (!tpl) fail('Token needs a name.');
       for (let i = 0; i < count; i++) {
         const c = instantiate(game, tpl, p.id, { isToken: true });
-        autoPlace(game, p.id, c);
+        autoPlace(game, p.id, c, a.hint);
         placeIn(game, c, 'battlefield', p.id);
       }
       addLog(game, `${actor.name} created ${count} ${tpl.name}${tpl.pt ? ` (${tpl.pt})` : ''} token${count === 1 ? '' : 's'}${p.id !== actor.id ? ` for ${p.name}` : ''}.`);
@@ -1242,9 +1632,8 @@ function applyAction(game, actor, a, opts = {}) {
       const pid = src.zone === 'battlefield' ? src.zp : actor.id;
       const c = instantiate(game, src, actor.id, { isToken: true });
       c.isCommander = false;
-      c.x = Math.min(TABLE_W - CARD_W, src.x + 25);
-      c.y = Math.min(TABLE_H - CARD_H, src.y + 25);
-      if (src.zone !== 'battlefield') autoPlace(game, pid, c);
+      if (src.zone === 'battlefield') autoPlace(game, pid, c, { x: src.x + 160, y: src.y + 70 });
+      else autoPlace(game, pid, c, a.hint);
       placeIn(game, c, 'battlefield', pid);
       addLog(game, `${actor.name} created a token copy of ${src.name}.`);
       break;
@@ -1286,6 +1675,7 @@ function applyAction(game, actor, a, opts = {}) {
       idx = (idx + 1) % order.length;
       const next = getPlayer(game, order[idx]);
       game.turn.active = next.id;
+      game.combat = null;
       game.turn.number += 1;
       game.turn.phase = 0;
       addLog(game, `— Turn ${game.turn.number}: ${next.name}'s turn —`, { kind: 'turn' });
@@ -1303,6 +1693,10 @@ function applyAction(game, actor, a, opts = {}) {
 
     case 'setPhase':
       game.turn.phase = int(a.phase, 0, PHASES.length - 1, game.turn.phase);
+      if (game.turn.phase === 4 && actor.id === game.turn.active && !game.combat) {
+        game.combat = { attacker: actor.id, attacks: [], done: {} };
+        addLog(game, `${actor.name} began combat.`, { kind: 'turn' });
+      }
       break;
 
     case 'setActive': {
@@ -1355,6 +1749,8 @@ function applyAction(game, actor, a, opts = {}) {
       for (const c of Object.values(game.cards)) if (!getPlayer(game, c.owner)) destroyCard(game, c);
       game.dice = {};
       game.requests = [];
+      game.combat = null;
+      game.reveal = null;
       game.order = [];
       game.turn = { active: null, number: 1, phase: 0 };
       game.setup = { stage: 'mulligan', rollers: withDecks.map((p) => p.id), kept: {}, mulls: {}, results: {}, eligible: [], anims: {}, round: 1 };
@@ -1427,6 +1823,9 @@ function cardView(c, viewerId, forceVisible = false, stats = null) {
     typeLine: c.typeLine,
     pt: c.pt,
     backPt: c.backPt,
+    loyalty: c.loyalty,
+    cmc: c.cmc,
+    colors: c.colors,
     backTypeLine: c.backTypeLine,
     manaCost: c.manaCost,
     oracle: c.oracle,
@@ -1476,6 +1875,7 @@ function viewFor(game, viewerId, connectedIds = new Set()) {
       handRevealed: p.handRevealed,
       deckName: p.deckName,
       bfColor: p.bfColor || null,
+      shuffleSeq: p.shuffleSeq || 0,
       handCount: p.zones.hand.length,
       libraryCount: p.zones.library.length,
       topCard,
@@ -1484,6 +1884,21 @@ function viewFor(game, viewerId, connectedIds = new Set()) {
     };
   });
   game.stack.forEach(add);
+  if (game.reveal) game.reveal.ids.forEach(add);
+  let combat = null;
+  if (game.combat) {
+    combat = {
+      attacker: game.combat.attacker,
+      done: game.combat.done,
+      participants: combatParticipants(game),
+      attacks: game.combat.attacks.map((at) => ({ ...at, defender: defenderOf(game, at), dmg: attackDamage(game, at, stats) })),
+    };
+    for (const at of game.combat.attacks) {
+      add(at.cardId);
+      at.blockers.forEach(add);
+      if (at.target.kind === 'pw') add(at.target.id);
+    }
+  }
   // commanders referenced by commander damage stay visible even if they move to hidden zones
   for (const p of game.players) for (const id of Object.keys(p.cmdDamage)) if (game.cards[id] && !cards[id]) {
     const c = game.cards[id];
@@ -1498,6 +1913,8 @@ function viewFor(game, viewerId, connectedIds = new Set()) {
     turn: game.turn,
     order: turnOrder(game),
     setup: game.setup,
+    combat,
+    reveal: game.reveal,
     dice: game.dice,
     requests: game.requests
       .filter((r) => r.from === viewerId || r.to === viewerId)
@@ -1539,6 +1956,21 @@ function upgradeGame(g) {
   if (!g.nextLogId) g.nextLogId = (g.log.length ? g.log[g.log.length - 1].id : 0) + 1;
   if (!g.turn) g.turn = { active: null, number: 1, phase: 0 };
   if (!g.cards) g.cards = {};
+  if (g.combat === undefined) g.combat = null;
+  if (g.reveal === undefined) g.reveal = null;
+  if (!g.planeV || g.planeV < PLANE_V) {
+    // older versions used a small 1600x700 table; centre those cards on the big plane
+    for (const c of Object.values(g.cards)) if (c.zone === 'battlefield') {
+      c.x = (c.x || 0) + 2200;
+      c.y = (c.y || 0) + 1650;
+    }
+    for (const d of Object.values(g.dice || {})) {
+      d.x += 2200;
+      d.y += 1650;
+      delete d.rx;
+    }
+    g.planeV = PLANE_V;
+  }
   for (const p of g.players || []) {
     if (p.bfColor === undefined) p.bfColor = null;
     if (!p.counters) p.counters = {};
@@ -1572,12 +2004,16 @@ const api = {
   rid,
   makeCode,
   simulateDie,
+  dieRegion,
+  cardKeywords,
+  attackDamage,
   describeEffect,
   cleanEffects,
   computeStats,
   needsPermission,
   createRequest,
   UNDO_BARRIERS,
+  REACTIONS,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.MTGEngine = api;
