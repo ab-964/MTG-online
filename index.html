@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MTG Tabletop</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="css/style.css" />
+  <!-- PeerJS: lets the two browsers connect directly (no server on your PC). -->
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <!-- ============================== LOBBY ============================== -->
+  <div id="lobby" class="lobby" hidden>
+    <header class="lobby-head">
+      <h1>MTG Tabletop</h1>
+      <p>Play Magic with a friend online. One of you hosts, and the game is saved in the host's browser.</p>
+    </header>
+
+    <div class="lobby-grid">
+      <section class="panel">
+        <h2>Host a new game</h2>
+        <form id="host-form" class="form">
+          <label>Your name <input name="name" maxlength="24" required autocomplete="nickname" /></label>
+          <label>Game name <input name="game" maxlength="60" placeholder="Friday Commander" /></label>
+          <label>Format
+            <select name="format">
+              <option value="commander">Commander (40 life, command zone)</option>
+              <option value="standard">60-card (20 life)</option>
+            </select>
+          </label>
+          <button class="btn primary" type="submit">Create &amp; host</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Join a friend's game</h2>
+        <form id="join-form" class="form">
+          <label>Your name <input name="name" maxlength="24" required autocomplete="nickname" /></label>
+          <label>Game code <input name="code" maxlength="6" required placeholder="e.g. K7QZ4M" class="code-input" /></label>
+          <button class="btn primary" type="submit">Join</button>
+        </form>
+        <div id="recent-joins"></div>
+      </section>
+
+      <section class="panel wide">
+        <h2>Games you host</h2>
+        <p class="muted small">Saved in this browser. Open one to continue exactly where you left off. Your friends can only play while you have it open.</p>
+        <div id="hosted-list" class="hosted-list"></div>
+        <div class="row gap">
+          <label class="btn ghost file-btn">Restore a backup file…<input type="file" id="restore-input" accept=".json,application/json" hidden /></label>
+        </div>
+      </section>
+    </div>
+    <footer class="lobby-foot muted small">
+      Card images and data from <a href="https://scryfall.com" target="_blank" rel="noopener">Scryfall</a>. Not affiliated with Wizards of the Coast.
+    </footer>
+  </div>
+
+  <!-- ============================== GAME =============================== -->
+  <div id="game" class="game" hidden>
+    <header id="topbar" class="topbar">
+      <button class="btn ghost" id="btn-leave" title="Back to the lobby">‹ Lobby</button>
+      <div class="game-title"><span id="game-name"></span>
+        <button class="code-chip" id="btn-code" title="Copy invite link"></button>
+      </div>
+      <div id="status" class="status"></div>
+      <div class="spacer"></div>
+      <button class="btn" id="btn-deck">Load deck</button>
+      <button class="btn" id="btn-start">Start / restart game</button>
+      <button class="btn ghost" id="btn-settings" title="Settings">Settings</button>
+      <button class="btn ghost" id="btn-help" title="Help &amp; shortcuts">Help</button>
+      <button class="btn ghost" id="btn-log" title="Show / hide the log and chat">Log</button>
+    </header>
+
+    <main class="table">
+      <section id="opponents" class="opponents"></section>
+
+      <section class="centerbar">
+        <div class="turninfo">
+          <div id="turn-label" class="turn-label"></div>
+          <div id="phases" class="phases"></div>
+          <button class="btn primary" id="btn-pass">Pass turn ▶</button>
+        </div>
+        <div class="stack-wrap" data-drop="stack">
+          <span class="stack-label">Stack</span>
+          <div id="stack" class="stack"></div>
+        </div>
+        <div class="tools">
+          <button class="btn small" id="btn-token">+ Token</button>
+          <button class="btn small" id="btn-dice">Dice</button>
+        </div>
+      </section>
+
+      <section id="me-area" class="me-area"></section>
+    </main>
+
+    <footer class="handbar">
+      <div class="piles" id="piles"></div>
+      <div class="hand" id="hand" data-drop="hand"></div>
+    </footer>
+
+    <aside id="sidebar" class="sidebar">
+      <div id="log" class="log"></div>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" maxlength="300" placeholder="Chat… (Enter)" autocomplete="off" />
+      </form>
+    </aside>
+  </div>
+
+  <!-- floating UI -->
+  <div id="preview" class="preview" hidden></div>
+  <div id="menu" class="menu" hidden></div>
+  <div id="viewer" class="viewer" hidden></div>
+  <div id="modal-root"></div>
+  <div id="toasts" class="toasts"></div>
+
+  <script src="js/engine.js"></script>
+  <script src="js/importer.js"></script>
+  <script src="js/net.js"></script>
+  <script src="js/ui.js"></script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "name": "mtg-tabletop",
+  "version": "1.0.0",
+  "description": "Play Magic: The Gathering with friends in the browser. Peer-to-peer, no server needed. Imports Archidekt decklists with the right art.",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test"
+  }
+}
