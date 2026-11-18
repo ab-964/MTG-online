@@ -23,6 +23,8 @@
   const { $, $$, esc, clamp } = U;
 
   let built = false;
+  let mapCol = null; // which opponent the map is pointing at
+  let logOn = !!(window.MTGNet.Store.get('mtgtt.phoneLog'));
   let lastCombat = false;
   let view = 'bf'; // 'bf' | 'zones' | 'grid' | 'watch' | 'log'
   let watchPid = null;
@@ -37,12 +39,20 @@
     root.innerHTML = `
       <div class="pbar">
         <button class="pbtn" id="p-menu" aria-label="Menu">☰</button>
+        <button class="pbtn ptext" id="p-logbtn">Log</button>
         <div class="pturn" id="p-turn"></div>
         <div class="pphases" id="p-phases"></div>
+        <button class="pbtn ptext" id="p-cur" hidden></button>
         <button class="pbtn primary" id="p-pass">Pass ▶</button>
       </div>
       <div class="pmain" id="p-main">
-        <div class="pview" data-view="bf"><div class="pslot" id="p-slot-me"></div></div>
+        <div class="pview" data-view="bf">
+          <div class="pwatch mine">
+            <div class="plog log" id="p-me-log"></div>
+            <div class="pslot" id="p-slot-me"></div>
+            <div class="ppiles" id="p-piles"></div>
+          </div>
+        </div>
         <div class="pview" data-view="zones" hidden><div class="pzones" id="p-zones"></div></div>
         <div class="pview" data-view="grid" hidden><div class="pgrid" id="p-grid"></div></div>
         <div class="pview" data-view="watch" hidden>
@@ -52,7 +62,9 @@
             <div class="pside" id="p-watch-side"></div>
           </div>
         </div>
-        <div class="pview" data-view="combat" hidden><div class="pcombat" id="p-combat"></div></div>
+        <div class="pview" data-view="combat" hidden>
+          <div class="pcombat"><div class="pcb-head" id="p-combat-head"></div><div class="pcb-main cbo-main" id="p-combat"></div><div class="pcb-bar" id="p-combat-bar"></div></div>
+        </div>
         <div class="pview" data-view="log" hidden>
           <div class="plogview"><div class="log" id="p-log"></div>
             <form id="p-chat" class="chat-form"><input maxlength="300" placeholder="Chat…" autocomplete="off"></form></div>
@@ -70,6 +82,28 @@
       st.textContent = U.status.text;
     }
     $('#p-menu').addEventListener('click', openMainMenu);
+    $('#p-logbtn').addEventListener('click', () => {
+      logOn = !logOn;
+      window.MTGNet.Store.set('mtgtt.phoneLog', logOn);
+      render(U.S);
+      requestAnimationFrame(() => {
+        for (const pid of Object.keys(bfs)) if (U.views[pid] && U.views[pid].auto) fitPhone(pid);
+      });
+    });
+    $('#p-cur').addEventListener('click', () => {
+      const S = U.S;
+      if (!S) return;
+      if (view !== 'bf') return setView('bf');
+      const act = S.turn.active;
+      if (act && act !== S.you) goWatch(act);
+    });
+    $('#p-piles').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pile]');
+      if (!b) return;
+      if (b.dataset.pile === 'library') return U.libraryClick(e.clientX, e.clientY);
+      if (b.dataset.pile === 'graveyard') return U.openViewer(U.S.you, 'graveyard');
+      setView('zones');
+    });
     $('#p-pass').addEventListener('click', () => U.act({ type: 'passTurn' }));
     $('#p-back').addEventListener('click', () => setView('bf'));
     $('#p-phases').addEventListener('click', (e) => {
@@ -87,16 +121,14 @@
       const cell = e.target.closest('[data-pid]');
       if (!cell) return;
       if (cell.dataset.pid === U.S.you) setView('bf');
-      else {
-        watchPid = cell.dataset.pid;
-        setView('watch');
-      }
+      else goWatch(cell.dataset.pid);
     });
     $('#p-watch-side').addEventListener('click', (e) => {
       const b = e.target.closest('[data-zone]');
       if (b) U.openViewer(watchPid, b.dataset.zone);
     });
     $('#p-combat').addEventListener('click', onCombatTap);
+    $('#p-combat-bar').addEventListener('click', (e) => U.combatClick(e));
     $('#p-nav').addEventListener('click', (e) => {
       const b = e.target.closest('[data-nav]');
       const t = $('#p-nav')._t || {};
@@ -127,7 +159,8 @@
 
   function checkOrientation() {
     const portrait = window.innerHeight > window.innerWidth;
-    $('#rotate').hidden = !(U.phone && portrait);
+    $('#rotate').hidden = true;
+    document.body.classList.toggle('portrait', U.phone && portrait);
     for (const pid of Object.keys(bfs)) if (U.views[pid] && U.views[pid].auto) U.views[pid].auto = true;
     requestAnimationFrame(() => {
       for (const pid of Object.keys(bfs)) if (!U.views[pid] || U.views[pid].auto) fitPhone(pid);
@@ -152,8 +185,20 @@
     if (view === 'combat' && !S.combat) view = 'bf';
     const me = U.me();
     const active = U.playerById(S.turn.active);
-    $('#p-turn').textContent = active ? (active.id === S.you ? 'Your turn' : `${active.name}'s turn`) : 'Setting up';
+    $('#p-turn').textContent = !active ? 'Setting up' : active.id === S.you ? 'Your turn' : '';
     $('#p-turn').classList.toggle('mine', !!active && active.id === S.you);
+    $('#p-logbtn').classList.toggle('on', logOn);
+    const cur = $('#p-cur');
+    if (view !== 'bf') {
+      cur.hidden = false;
+      cur.innerHTML = `${U.ICONS.back}<span>Return</span>`;
+    } else if (active && active.id !== S.you) {
+      cur.hidden = false;
+      cur.textContent = `${active.name}'s turn ›`;
+    } else cur.hidden = true;
+    $('#phone').classList.toggle('log-on', logOn);
+    $('#phone').classList.toggle('no-arrows', window.MTGNet.Store.get('mtgtt.phoneArrows') === false);
+    $('#phone').classList.toggle('no-piles', window.MTGNet.Store.get('mtgtt.phonePiles') === false);
     $('#p-phases').innerHTML = S.phases.map((ph, i) => `<span class="phase ${i === S.turn.phase ? 'on' : ''}" data-i="${i}">${esc(ph)}</span>`).join('');
     $('#p-pass').disabled = !active;
 
@@ -161,12 +206,16 @@
     $('#p-main').dataset.view = view;
     $('#p-back').hidden = view === 'bf';
 
-    if (view === 'bf' && me) mountBf($('#p-slot-me'), me);
+    if (view === 'bf' && me) {
+      mountBf($('#p-slot-me'), me);
+      renderPiles(S, me);
+      if (logOn) U.renderLog($('#p-me-log'));
+    }
     if (view === 'watch') {
       const p = U.playerById(watchPid);
       if (!p) return setView('grid');
       mountBf($('#p-slot-watch'), p);
-      U.renderLog($('#p-watch-log'));
+      if (logOn) U.renderLog($('#p-watch-log'));
       const z = p.zones;
       const top = (arr) => (arr.length ? S.cards[arr[arr.length - 1]] : null);
       const pile = (zone, label, arr) => {
@@ -177,8 +226,8 @@
     }
     if (view === 'combat') renderPhoneCombat(S);
     renderNav(S);
-    if (S.combat && !lastCombat && (S.combat.attacker === S.you || S.combat.participants.includes(S.you) || S.combat.attacker !== S.you))
-      U.toast(S.combat.attacker === S.you ? 'Combat! Tap ↑ for the combat zone, or drag creatures to the top of the screen.' : `${(U.playerById(S.combat.attacker) || {}).name || 'Someone'} is attacking! Tap ↑ to see the combat zone.`);
+    if (S.combat && !lastCombat)
+      U.toast(S.combat.attacker === S.you ? 'Combat! Tap ▲ for the combat zone, or drag creatures to the top of the screen.' : `${(U.playerById(S.combat.attacker) || {}).name || 'Someone'} is attacking! Tap ▲ to see the combat zone.`);
     lastCombat = !!S.combat;
     if (view === 'zones') renderZones(S, me);
     if (view === 'grid') renderGrid(S);
@@ -197,7 +246,7 @@
       .map(([k, v]) => `<span class="pc">${esc(k)} ${v}</span>`)
       .join('');
     return `<span class="dot" style="background:${esc(p.color)}"></span><b>${p.life}</b><span class="nm">${esc(p.id === U.S.you ? 'You' : p.name)}</span>${ctr}
-      <span class="muted">✋${p.handCount} 📚${p.libraryCount}</span>`;
+      <span class="muted pcount">${U.ICONS.hand}${p.handCount} ${U.ICONS.library}${p.libraryCount}</span>`;
   }
 
   function mountBf(slot, p) {
@@ -282,6 +331,7 @@
 
     bf.addEventListener('pointerdown', (e) => {
       if (!U.phone) return;
+      if (e.target.closest('button')) return; // life badge etc. get a normal tap
       bf.setPointerCapture(e.pointerId);
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pointers.size === 2) {
@@ -462,31 +512,67 @@
   // The map during combat:   [opponent battlefields]
   //                          [combat with each opponent]  (← →)
   //                          [            me            ]
-  function navTargets(S) {
+  // The map:   [ opponents' battlefields, left to right in turn order ]
+  //            [ combat zone with each of them (only during combat)    ]
+  //            [                         you                           ]
+  function opponents() {
+    return U.seatOrder().filter((id) => id !== U.S.you);
+  }
+  function homeCol() {
+    const S = U.S;
+    const opps = opponents();
     const cb = S.combat;
-    if (!cb) return {};
-    const iAttack = cb.attacker === S.you;
-    const def = U.currentCombatDef();
-    const other = iAttack ? def : cb.attacker;
+    if (cb) {
+      const target = cb.attacker === S.you ? U.currentCombatDef() : cb.attacker;
+      const i = opps.indexOf(target);
+      if (i >= 0) return i;
+    }
+    if (mapCol != null && mapCol < opps.length) return mapCol;
+    return opps.length === 3 ? 1 : 0;
+  }
+  /** Does this opponent have a combat zone with you right now? */
+  function hasCombatWith(pid) {
+    const cb = U.S.combat;
+    if (!cb) return false;
+    return cb.attacker === U.S.you ? U.combatDefenders().includes(pid) : pid === cb.attacker;
+  }
+  function goWatch(pid) {
+    watchPid = pid;
+    mapCol = opponents().indexOf(pid);
+    setView('watch');
+  }
+  function goCombat(pid) {
+    if (U.S.combat.attacker === U.S.you) U.setCombatDef(pid);
+    mapCol = opponents().indexOf(pid);
+    setView('combat');
+  }
+
+  function navTargets(S) {
+    const opps = opponents();
+    if (!opps.length) return {};
     const name = (id) => (U.playerById(id) || {}).name || '?';
     const t = {};
-    if (view === 'bf' || view === 'zones') t.up = { label: '⚔ Combat', go: () => setView('combat') };
+    const col = homeCol();
+    if (view === 'bf') {
+      const pid = opps[col];
+      t.up = hasCombatWith(pid) ? { label: 'Combat', icon: U.ICONS.sword, go: () => goCombat(pid) } : { label: name(pid), go: () => goWatch(pid) };
+    }
     if (view === 'combat') {
-      t.down = { label: 'Me', go: () => setView('bf') };
-      t.up = { label: `${name(other)}'s battlefield`, go: () => { watchPid = other; setView('watch'); } };
-      if (iAttack && U.combatDefenders().length > 1) {
-        t.left = { label: '◀', go: () => U.switchCombatDef(-1) };
-        t.right = { label: '▶', go: () => U.switchCombatDef(1) };
+      const pid = S.combat.attacker === S.you ? U.currentCombatDef() : S.combat.attacker;
+      t.down = { label: 'You', go: () => setView('bf') };
+      t.up = { label: name(pid), go: () => goWatch(pid) };
+      const cells = opps.filter(hasCombatWith);
+      const i = cells.indexOf(pid);
+      if (cells.length > 1) {
+        if (i > 0) t.left = { label: name(cells[i - 1]), go: () => goCombat(cells[i - 1]) };
+        if (i < cells.length - 1) t.right = { label: name(cells[i + 1]), go: () => goCombat(cells[i + 1]) };
       }
     }
     if (view === 'watch') {
-      t.down = {
-        label: '⚔ Combat',
-        go: () => {
-          if (iAttack && U.combatDefenders().includes(watchPid)) U.setCombatDef(watchPid);
-          setView('combat');
-        },
-      };
+      const i = opps.indexOf(watchPid);
+      t.down = hasCombatWith(watchPid) ? { label: 'Combat', icon: U.ICONS.sword, go: () => goCombat(watchPid) } : { label: 'You', go: () => setView('bf') };
+      if (i > 0) t.left = { label: name(opps[i - 1]), go: () => goWatch(opps[i - 1]) };
+      if (i >= 0 && i < opps.length - 1) t.right = { label: name(opps[i + 1]), go: () => goWatch(opps[i + 1]) };
     }
     return t;
   }
@@ -494,44 +580,38 @@
   function renderNav(S) {
     const nav = $('#p-nav');
     const t = navTargets(S);
+    const arrow = { up: '▲', down: '▼', left: '◀', right: '▶' };
     nav.innerHTML = ['up', 'down', 'left', 'right']
       .filter((k) => t[k])
-      .map((k) => `<button class="pnav-btn ${k}" data-nav="${k}">${k === 'up' ? '▲ ' : k === 'down' ? '▼ ' : ''}${esc(t[k].label)}</button>`)
+      .map((k) => `<button class="pnav-btn ${k}" data-nav="${k}"><span class="ar">${arrow[k]}</span>${t[k].icon || ''}<span>${esc(t[k].label)}</span></button>`)
       .join('');
     nav._t = t;
   }
 
+  /** Library and graveyard peeking in from the right edge, plus a tiny "Other zones" button. */
+  function renderPiles(S, me) {
+    const box = $('#p-piles');
+    const gy = me.zones.graveyard.length ? S.cards[me.zones.graveyard[me.zones.graveyard.length - 1]] : null;
+    const libTop = me.revealTop && me.topCard && S.cards[me.topCard];
+    const sig = `${me.libraryCount}|${gy ? gy.id : ''}|${libTop ? libTop.id : ''}|${me.zones.exile.length}|${me.zones.command.length}`;
+    if (box.dataset.sig === sig) return;
+    box.dataset.sig = sig;
+    box.innerHTML = `<button class="ppile" data-pile="library" data-lib="${me.id}">${libTop && libTop.img ? `<img src="${esc(libTop.img)}" alt="">` : '<div class="back">✦</div>'}<span class="pp-n">${me.libraryCount}</span></button>
+      <button class="ppile" data-pile="graveyard">${gy ? (gy.img ? `<img src="${esc(gy.img)}" alt="">` : `<span class="pp-t">${esc(gy.name)}</span>`) : '<span class="pp-t">Graveyard</span>'}<span class="pp-n">${me.zones.graveyard.length}</span></button>
+      <button class="pother" data-pile="other">Other zones</button>`;
+  }
+
   function renderPhoneCombat(S) {
-    const box = $('#p-combat');
     const cb = S.combat;
     const def = U.currentCombatDef();
     const defP = U.playerById(def);
     const attP = U.playerById(cb.attacker);
     const iAttack = cb.attacker === S.you;
-    const targets = [{ kind: 'player', id: def }];
-    for (const id of defP ? defP.zones.battlefield : []) {
-      const c = S.cards[id];
-      if (c && /\b(Planeswalker|Battle)\b/.test(c.typeLine || '')) targets.push({ kind: 'pw', id });
-    }
-    const atFor = (t) => cb.attacks.filter((a) => a.target.kind === t.kind && a.target.id === t.id);
-    const total = (list) => list.reduce((s, a) => s + (a.dmg || 0), 0);
-    const inIt = cb.participants.includes(S.you);
-    box.innerHTML = `<div class="cb-head">
-        <b>⚔ ${esc(iAttack ? 'You' : attP ? attP.name : '?')} → ${esc(def === S.you ? 'you' : defP ? defP.name : '?')}</b>
-        <span class="cb-total">Total <b>${total(atFor(targets[0]))}</b></span><span class="spacer"></span>
-        <span class="cb-ready">${cb.participants.map((id) => `<span class="cb-chip ${cb.done[id] ? 'ok' : ''}">${esc(id === S.you ? 'You' : (U.playerById(id) || {}).name || '?')} ${cb.done[id] ? '✓' : '…'}</span>`).join('')}</span>
-        ${inIt ? `<button class="btn small ${cb.done[S.you] ? '' : 'primary'}" data-cb="done">${cb.done[S.you] ? 'Not done' : 'Done ✓'}</button>` : ''}
-      </div>
-      <div class="cb-body">${targets
-        .map((t) => {
-          const list = atFor(t);
-          const c = t.kind === 'pw' ? S.cards[t.id] : null;
-          const label = c ? `${esc(c.name)} <span class="loyal-inline">${(c.counters || {}).loyalty != null ? c.counters.loyalty : esc(c.loyalty || '?')}</span> · <b>${total(list)}</b>` : `♥ ${defP ? defP.life : '?'}`;
-          return `<div class="cb-target ${t.kind}" data-tkind="${t.kind}" data-tid="${t.id}">
-            <div class="cb-tlabel">${label}${iAttack ? ' <span class="muted small">(tap to add attackers)</span>' : ''}</div>
-            <div class="cb-cols">${list.map((a) => U.combatColumnHTML(a, cb)).join('') || `<div class="cb-empty muted small">${iAttack ? 'Tap here, or drag creatures to the top of your battlefield' : 'No attackers'}</div>`}</div></div>`;
-        })
-        .join('')}</div>`;
+    const t = U.combatTargetsHTML(def);
+    $('#p-combat-head').innerHTML = `${U.ICONS.sword}<span>${esc(iAttack ? 'You' : attP ? attP.name : '?')} attacking <b>${esc(def === S.you ? 'you' : defP ? defP.name : '?')}</b></span>
+      ${iAttack ? '<span class="muted small">tap a target to add attackers</span>' : ''}`;
+    $('#p-combat').innerHTML = t.html;
+    $('#p-combat-bar').innerHTML = U.combatBarHTML(t.playerTotal);
   }
 
   /** Taps in the phone combat zone. */
@@ -659,68 +739,92 @@
     U.showMenu(U.cardMenu(c, ctx), 0, 0, { head: cardHead(c) });
   }
 
+  /** Life: slide right for damage, left for gain, ±1 to fine-tune. Applied when you close the window. */
   function lifeSheet(pid) {
     if (!U.S) return;
     const p = U.playerById(pid);
     if (!p) return;
-    const items = [
-      { header: `${p.id === U.S.you ? 'Your' : `${p.name}'s`} life: ${p.life}` },
-      { label: '−1 life', fn: () => U.act({ type: 'life', playerId: pid, delta: -1 }) },
-      { label: '+1 life', fn: () => U.act({ type: 'life', playerId: pid, delta: 1 }) },
-      { label: '−5 life', fn: () => U.act({ type: 'life', playerId: pid, delta: -5 }) },
-      { label: '+5 life', fn: () => U.act({ type: 'life', playerId: pid, delta: 5 }) },
-      { label: 'Set life…', fn: async () => { const n = await U.askNumber('Set life', p.life); if (n !== null) U.act({ type: 'setLife', playerId: pid, value: n }); } },
-      { sep: true },
-    ];
-    for (const [k, v] of Object.entries(p.counters || {})) {
-      items.push({ label: `${k} ${v}: +1`, fn: () => U.act({ type: 'playerCounter', playerId: pid, name: k, delta: 1 }) });
-      items.push({ label: `${k} ${v}: −1`, fn: () => U.act({ type: 'playerCounter', playerId: pid, name: k, delta: -1 }) });
-    }
-    items.push({ label: '+ Player counter (poison, energy…)', fn: async () => { const n = await U.askText('Add a player counter', 'poison'); if (n) U.act({ type: 'playerCounter', playerId: pid, name: n, delta: 1 }); } });
-    if (U.S.format === 'commander') {
-      const cmds = Object.values(U.S.cards).filter((c) => c.isCommander && c.owner !== pid && !c.isToken);
-      for (const c of cmds) {
-        const owner = U.playerById(c.owner);
-        const v = (p.cmdDamage || {})[c.id] || 0;
-        items.push({ label: `Commander dmg from ${owner ? owner.name : '?'}'s ${c.name}: ${v}  (+1)`, fn: () => U.act({ type: 'cmdDamage', playerId: pid, sourceId: c.id, delta: 1 }) });
-        if (v) items.push({ label: `…remove 1`, fn: () => U.act({ type: 'cmdDamage', playerId: pid, sourceId: c.id, delta: -1 }) });
-      }
-    }
-    U.showMenu(items, 0, 0, {});
+    let delta = 0;
+    const counters = Object.entries(p.counters || {});
+    const cmds = U.S.format === 'commander' ? Object.values(U.S.cards).filter((c) => c.isCommander && c.owner !== pid && !c.isToken) : [];
+    U.dialog({
+      title: `${p.id === U.S.you ? 'Your' : `${p.name}'s`} life`,
+      body: `<div class="lf-now"><span class="lf-old">${p.life}</span><span class="lf-arrow">→</span><b class="lf-new">${p.life}</b><span class="lf-desc muted"></span></div>
+        <div class="lf-slide"><span class="muted small">gain</span><input type="range" min="-20" max="20" step="1" value="0" class="lf-range"><span class="muted small">damage</span></div>
+        <div class="row gap lf-btns"><button class="btn" data-lf="-1">−1</button><button class="btn" data-lf="1">+1</button></div>
+        ${counters.length || cmds.length ? '<div class="sect-title">Counters &amp; commander damage</div>' : ''}
+        ${counters.map(([k, v]) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span><button class="btn tiny" data-pc="${esc(k)}" data-d="-1">−</button><button class="btn tiny" data-pc="${esc(k)}" data-d="1">+</button></div>`).join('')}
+        ${cmds
+          .map((c) => {
+            const owner = U.playerById(c.owner);
+            const v = (p.cmdDamage || {})[c.id] || 0;
+            return `<div class="kv"><span class="k">${esc(owner ? owner.name : '?')} · ${esc(c.name)}</span><span class="v">${v}</span><button class="btn tiny" data-cmd="${c.id}" data-d="-1">−</button><button class="btn tiny" data-cmd="${c.id}" data-d="1">+</button></div>`;
+          })
+          .join('')}
+        <button class="btn small" data-pcadd="1">+ Player counter (poison, energy…)</button>`,
+      buttons: [{ label: 'Done', value: 'ok', primary: true }],
+      onMount(root) {
+        const range = root.querySelector('.lf-range');
+        const draw = () => {
+          root.querySelector('.lf-new').textContent = String(p.life + delta);
+          root.querySelector('.lf-desc').textContent = delta < 0 ? `${-delta} damage` : delta > 0 ? `gain ${delta}` : '';
+          range.value = String(clamp(-delta, -20, 20));
+        };
+        range.addEventListener('input', () => {
+          delta = -Number(range.value);
+          draw();
+        });
+        root.addEventListener('click', async (e) => {
+          const b = e.target.closest('button');
+          if (!b) return;
+          if (b.dataset.lf) {
+            delta += Number(b.dataset.lf);
+            draw();
+          }
+          if (b.dataset.pc) U.act({ type: 'playerCounter', playerId: pid, name: b.dataset.pc, delta: Number(b.dataset.d) });
+          if (b.dataset.cmd) U.act({ type: 'cmdDamage', playerId: pid, sourceId: b.dataset.cmd, delta: Number(b.dataset.d) });
+          if (b.dataset.pcadd) {
+            const n = await U.askText('Add a player counter', 'poison');
+            if (n) U.act({ type: 'playerCounter', playerId: pid, name: n, delta: 1 });
+          }
+        });
+      },
+    }).then(() => {
+      // closing the window (Done, or tapping outside) applies the change; Undo fixes mistakes
+      if (delta) U.act({ type: 'life', playerId: pid, delta });
+    });
   }
 
   function openMainMenu() {
     const S = U.S;
     if (!S) return U.toast('Still loading the game… one moment.');
     const pid = view === 'watch' ? watchPid : S.you;
-    const others = U.seatOrder().filter((id) => id !== S.you);
+    const I = U.ICONS;
+    const others = opponents();
     U.showMenu(
       [
         { header: `${S.name} · code ${S.id}` },
-        { label: '🂠 My battlefield', fn: () => setView('bf') },
-        { label: '📚 My zones (library, graveyard, exile, command)', fn: () => setView('zones') },
-        others.length === 1
-          ? { label: `👀 Watch ${U.playerById(others[0]).name}'s battlefield`, fn: () => { watchPid = others[0]; setView('watch'); } }
-          : null,
-        others.length ? { label: '▦ All battlefields', fn: () => setView('grid') } : null,
-        { label: '📜 Log & chat', fn: () => setView('log') },
+        { label: 'My battlefield', icon: I.field, fn: () => setView('bf') },
+        { label: 'Other zones (library, graveyard, exile, command)', icon: I.zones, fn: () => setView('zones') },
+        others.length ? { label: 'All battlefields', icon: I.grid, fn: () => setView('grid') } : null,
+        { label: 'Log & chat', icon: I.log, fn: () => setView('log') },
         { sep: true },
-        { label: '＋ Zoom in', fn: () => zoomPhone(pid, 1.3) },
-        { label: '－ Zoom out', fn: () => zoomPhone(pid, 0.77) },
-        { label: '⤢ Fit battlefield', fn: () => fitPhone(pid, false) },
+        { label: 'Zoom in', icon: I.zoomIn, fn: () => zoomPhone(pid, 1.3) },
+        { label: 'Zoom out', icon: I.zoomOut, fn: () => zoomPhone(pid, 0.77) },
+        { label: 'Fit battlefield', icon: I.fit, fn: () => fitPhone(pid, false) },
         { sep: true },
-        { label: '🎲 Drop a d20 on my battlefield', fn: () => { setView('bf'); U.act({ type: 'placeDie' }); } },
-        { label: '✦ Create token…', fn: () => U.tokenDialog(S.you) },
-        { label: '⟳ Proliferate…', fn: () => { setView('bf'); U.startProliferate(); } },
-        { label: '↶ Undo', fn: () => U.act({ type: 'undo' }) },
-        { label: '⇄ Untap all my permanents', fn: () => U.act({ type: 'untapAll' }) },
+        { label: 'Drop a d20 on my battlefield', icon: I.die, fn: () => { setView('bf'); U.act({ type: 'placeDie' }); } },
+        { label: 'Create token…', icon: I.token, fn: () => U.tokenDialog(S.you) },
+        { label: 'Proliferate…', icon: I.prolif, fn: () => { setView('bf'); U.startProliferate(); } },
+        { label: 'Undo', icon: I.undo, fn: () => U.act({ type: 'undo' }) },
+        { label: 'Untap all my permanents', icon: I.untap, fn: () => U.act({ type: 'untapAll' }) },
         { sep: true },
-        { label: 'Load deck…', fn: () => U.deckDialog() },
-        { label: S.setup && S.setup.stage !== 'done' ? 'Restart game…' : 'Start game…', fn: () => U.startGameClick() },
-        { label: 'Copy invite link', fn: () => U.copyInvite() },
-        { label: 'Settings (colour, layout…)', fn: () => U.settingsDialog() },
-        { label: 'Help', fn: () => U.helpDialog() },
-        { label: 'Leave to lobby', fn: () => U.leaveGame() },
+        { label: 'Load deck…', icon: I.deck, fn: () => U.deckDialog() },
+        { label: S.setup && S.setup.stage !== 'done' ? 'Restart game…' : 'Start game…', icon: I.play, fn: () => U.startGameClick() },
+        { label: 'Copy invite link', icon: I.link, fn: () => U.copyInvite() },
+        { label: 'Settings', icon: I.gear, fn: () => U.settingsDialog() },
+        { label: 'Help', icon: I.help, fn: () => U.helpDialog() },
+        { label: 'Leave to lobby', icon: I.leave, fn: () => U.leaveGame() },
       ],
       0,
       0,

@@ -36,7 +36,7 @@ const PLANE_V = 3;
 const CARD_W = 100;
 const CARD_H = 140;
 const LOG_LIMIT = 400;
-const REACTIONS = ['😠', '😂', '🖕', '😭', '😨', '💀'];
+const REACTIONS = ['😠', '😂', '🖕', '😭', '😨', '💀', '👍', '😈', '🫰'];
 
 const rid = (bytes = 6) => randomHex(bytes);
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';

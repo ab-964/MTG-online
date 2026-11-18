@@ -5,14 +5,14 @@ A free, browser-based tabletop for playing **Magic: The Gathering** with up to 4
 - **No server to run.** It's a plain website (host it free on GitHub Pages). The host's browser *is* the game, and friends connect straight to it, peer-to-peer.
 - **Games are saved** in the host's browser after every action. Anyone who drops out just reloads and rejoins. The host can close the tab or restart their PC and carry on later.
 - **Archidekt decklists with the right art.** Paste Archidekt's text export and each card shows the exact printing you picked (via Scryfall).
-- **Computer and phone layouts.** On a phone (landscape) the battlefield fills the screen, your hand sits along the bottom, and everything else is a tap away.
+- **Computer and phone layouts.** On a phone (portrait or landscape) the battlefield fills the screen, your hand sits along the bottom, and everything else is a tap away.
 - **Fair-play permission system.** Touching another player's battlefield, hand, library or life sends them an Allow / Deny request.
 - **Effects that do the maths.** Set up what cards do (anthems, equipment, "+1/+0 for each artifact", "enters with an extra counter", keywords). Power/toughness totals then update by themselves. A helper reads your cards' text when you import and suggests effects for you to approve.
 - **Undo**, a **flickable d20** (and a dice-off for turn order), **mulligans**, **proliferate**, **counters**, **equipment & auras**, **tokens**, **commander damage & tax**, **chat** and a **game log**.
-- **Combat zone**: drag attackers in (at players or planeswalkers), defenders drag in blockers, each column shows the damage it would deal (double strike, +X and ×N included, in the order you choose), and everyone presses Done.
+- **Combat screen**: a dark overlay on computer (its own screen on phones); drag attackers in (at players or planeswalkers), defenders drag in blockers, each column shows the damage it would deal (double strike, +X and ×N included, in the order you choose), and everyone presses Done.
 - **A big free battlefield**: put cards anywhere; new cards land in the middle of your screen; **Fit** shows everything.
 - **Reveal until…**, a tidy library menu (click for the menu, double-click to draw), and a little shuffle animation.
-- **Emoji reactions** on chat and log lines: 😠 😂 🖕 😭 😨 💀
+- **Emoji reactions** on chat and log lines: 😠 😂 🖕 😭 😨 💀 👍 😈 🫰
 - **Rules aren't enforced.** Like a real table, you're in charge. Every card links to its Scryfall page for rulings.
 
 👉 **New here? Follow [docs/SETUP.md](docs/SETUP.md)** to put it on GitHub Pages (one time) and see what to do each time you play.
@@ -32,7 +32,7 @@ A free, browser-based tabletop for playing **Magic: The Gathering** with up to 4
 | Undo | **↶ Undo** or <kbd>Ctrl</kbd>+<kbd>Z</kbd> |
 | d20 | **d20** drops a die on your battlefield; flick it to roll, click it to remove |
 
-## Quick tour (phone, landscape)
+## Quick tour (phone)
 
 | Do this | How |
 |---|---|
@@ -42,9 +42,11 @@ A free, browser-based tabletop for playing **Magic: The Gathering** with up to 4
 | Re-order your hand | Hold a card, then slide it sideways |
 | Battlefield | Drag to look around, pinch to zoom. Tap a land to tap it. Tap anything else for options. Hold + drag to move it |
 | Resolve the stack | Tap the spell → green **Resolves** / red **Doesn't resolve** |
-| Library, graveyard, exile, command zone | ☰ → **My zones** |
-| Watch opponents | ☰ → **All battlefields**, then tap one (their log and graveyard/exile sit alongside) |
-| Your life | Tap your life badge (bottom-right) |
+| Library, graveyard | Peeking in from the right edge (tap library for its menu, double-tap to draw) |
+| Exile, command zone | **Other zones** under the piles |
+| Move around | ▲ ▼ ◀ ▶ buttons: opponents above you in turn order, combat in between. **Current player** / **Return** at the top |
+| Log | **Log** button at the top |
+| Your life | Tap your life badge: slide for damage/gain, ±1, applied when you close it |
 
 ## How it works
 

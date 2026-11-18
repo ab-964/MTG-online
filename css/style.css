@@ -630,3 +630,116 @@ body.phone-mode .rx-add { opacity: .7; }
 .rx-pick button:hover { transform: scale(1.25); background: rgba(255,255,255,.08); }
 .pedges { z-index: 1250; }
 body.phone-mode .drag-ghost { opacity: .75; }
+.mic { width: 18px; height: 18px; vertical-align: -4px; margin-right: 10px; opacity: .9; flex: none; }
+.mi:has(.mic) { display: flex; align-items: center; }
+
+/* ============================================================ v4 combat */
+.combat.combat-ov { position: fixed; top: 48px; left: 0; right: var(--side); bottom: 0; height: auto; z-index: 880; background: rgba(8,10,14,.86); backdrop-filter: blur(2px); border: 0; border-radius: 0; display: flex; flex-direction: column; }
+.game.no-log ~ .combat.combat-ov, body:has(.game.no-log) .combat.combat-ov { right: 0; }
+.cbo-top { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 10px; font-size: 15px; color: #d7dbe3; }
+.cbo-main { flex: 1; min-height: 0; display: flex; gap: 12px; padding: 4px 16px; overflow: auto; align-items: stretch; }
+.cbo-avail { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-top: 1px solid rgba(255,255,255,.08); }
+.cbo-lbl { color: var(--muted); font-size: 12px; writing-mode: vertical-rl; transform: rotate(180deg); }
+.cbo-cards { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px; }
+.cbo-cards .card { position: relative; flex: none; width: var(--cbw); height: calc(var(--cbw) * 1.4); }
+.cbo-bar, .pcb-bar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: rgba(20,24,31,.95); border-top: 1px solid var(--line); }
+.combat-back { position: fixed; z-index: 890; left: 50%; bottom: 210px; transform: translateX(-50%); display: flex; align-items: center; gap: 6px; }
+.combat-back .mic { margin-right: 0; }
+.cb-donebtn { min-width: 120px; }
+
+/* shared columns: grey, minimal; your creatures nearest you */
+:root { --cbw: 84px; }
+.cb-target { background: rgba(255,255,255,.035); border: 1px dashed rgba(255,255,255,.18); border-radius: 12px; padding: 8px; gap: 8px; min-width: 0; }
+.cb-target.player { min-width: 220px; }
+.cb-target.pw { min-width: calc(var(--cbw) + 20px); }
+.cb-target.drop-hover { border-color: #8fb3e0; background: rgba(79,143,224,.08) !important; }
+.cb-tlabel { color: #d7dbe3; font-weight: 600; gap: 8px; }
+.cb-tlabel .muted { font-weight: 400; }
+.cb-sum { margin-left: auto; background: #2a2f38; border: 1px solid #4a5160; border-radius: 6px; padding: 0 8px; font-weight: 800; color: #fff; }
+.cb-pwhead { display: flex; align-items: flex-start; gap: 6px; }
+.cb-pwhead .card { position: relative; width: calc(var(--cbw) * .8); height: calc(var(--cbw) * 1.12); }
+.cb-cols { gap: 10px; align-items: flex-start; flex-wrap: nowrap; overflow: visible; }
+.cb-empty { margin: auto; color: var(--muted); font-size: 12px; padding: 20px 0; }
+.cb-col { width: auto; min-width: calc(var(--cbw) + 12px); background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.1); border-radius: 10px; padding: 6px; gap: 6px; }
+.cb-col.drop-hover { border-color: #8fb3e0 !important; background: rgba(79,143,224,.1) !important; }
+.cb-dmg { font-size: 20px; font-weight: 800; color: #fff; background: #2a2f38; border-radius: 8px; padding: 1px 10px; }
+.cb-mod { background: #2a2f38; border-color: #4a5160; }
+.cb-att .card, .cb-blocker .card { width: var(--cbw); height: calc(var(--cbw) * 1.4); }
+.cb-blockers { flex-direction: row; flex-wrap: wrap; gap: 6px; max-width: none; justify-content: center; }
+.cb-blocker { position: relative; flex-direction: column; align-items: center; gap: 2px; }
+.cb-bbtns { flex-direction: row; }
+.cb-noblock { color: var(--muted); font-size: 11px; padding: 6px 0; }
+.cb-total { background: #2a2f38; border: 1px solid #4a5160; }
+.card.attacking { box-shadow: 0 0 0 3px #d0d4dc, 0 0 14px rgba(255,255,255,.35); }
+
+/* ============================================================ v4 phone */
+.pbtn.ptext { font-size: 13px; padding: 0 10px; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.pbtn.ptext .mic { width: 14px; height: 14px; margin: 0; }
+#p-logbtn.on { background: #6e5520; border-color: var(--accent); }
+.pturn:empty { display: none; }
+/* log column (toggle with the Log button) on your battlefield and opponents' */
+.pwatch { grid-template-columns: 0 minmax(0, 1fr) 76px; }
+.pwatch.mine { grid-template-columns: 0 minmax(0, 1fr); position: relative; }
+.phone.log-on .pwatch { grid-template-columns: 170px minmax(0, 1fr) 76px; }
+.phone.log-on .pwatch.mine { grid-template-columns: 170px minmax(0, 1fr); }
+.phone:not(.log-on) .pwatch .plog { display: none; }
+/* library + graveyard peeking from the right edge */
+.ppiles { position: absolute; right: 0; top: 50%; transform: translateY(-50%); z-index: 22; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
+.ppile { pointer-events: auto; position: relative; width: 74px; height: 104px; margin-right: -37px; border-radius: 8px; border: 2px solid #1b1410; background: #222; padding: 0; overflow: hidden; box-shadow: -3px 3px 10px rgba(0,0,0,.5); }
+.ppile img { width: 100%; height: 100%; object-fit: cover; }
+.ppile .back { position: absolute; inset: 0; background: repeating-linear-gradient(45deg, #3b2a1a 0 6px, #33241a 6px 12px); display: flex; align-items: center; justify-content: flex-start; padding-left: 10px; color: #6e5520; font-size: 20px; }
+.ppile .pp-n { position: absolute; left: 4px; bottom: 4px; background: rgba(0,0,0,.8); color: #fff; border-radius: 6px; padding: 0 5px; font-size: 12px; font-weight: 700; }
+.ppile .pp-t { position: absolute; left: 4px; top: 6px; right: 40px; font-size: 10px; color: #ccc; text-align: left; }
+.pother { pointer-events: auto; margin-right: 4px; font-size: 10px; padding: 3px 7px; border-radius: 6px; background: rgba(20,24,31,.9); border: 1px solid var(--line); color: var(--muted); }
+.phone.no-piles .ppiles { display: none; }
+.phone.no-arrows .pnav { display: none; }
+.phone .plife { right: 46px; }
+.phone.no-piles .plife { right: 6px; }
+.pcount .mic { width: 13px; height: 13px; margin: 0 2px 0 4px; vertical-align: -2px; }
+/* map arrows */
+.pnav-btn { display: inline-flex; align-items: center; gap: 5px; background: rgba(20,24,31,.9); border-color: #5b6b85; font-weight: 600; }
+.pnav-btn .mic { width: 14px; height: 14px; margin: 0; }
+.pnav-btn .ar { font-size: 11px; opacity: .8; }
+.pnav-btn.left, .pnav-btn.right { flex-direction: column; padding: 10px 8px; max-width: 70px; font-size: 11px; }
+.pnav-btn.right { right: 46px; }
+.phone.no-piles .pnav-btn.right, .pmain:not([data-view="bf"]) .pnav-btn.right { right: 6px; }
+/* combat screen (grey, minimal, Done always reachable at the bottom) */
+.pcombat { padding: 0; background: #181b21; display: flex; flex-direction: column; }
+.pcb-head { display: flex; align-items: center; gap: 8px; padding: 40px 12px 4px; color: #d7dbe3; font-size: 13px; }
+.pcb-head .mic { margin: 0; }
+.pcb-main { flex: 1; min-height: 0; padding: 4px 10px 40px; --cbw: 62px; }
+.pcb-bar { flex: none; padding: 6px 10px; gap: 6px; }
+.pcb-bar .cb-donebtn { min-width: 96px; }
+.pmain[data-view="combat"] .pnav-btn.down { bottom: 58px; }
+/* life slider */
+.lf-now { display: flex; align-items: baseline; gap: 10px; font-size: 18px; }
+.lf-now .lf-new { font-size: 34px; }
+.lf-slide { display: flex; align-items: center; gap: 8px; }
+.lf-range { flex: 1; height: 34px; accent-color: #e05252; }
+.lf-btns .btn { flex: 1; font-size: 18px; padding: 8px; }
+/* portrait phones */
+body.phone-mode.portrait .phone { grid-template-rows: auto minmax(0, 1fr) 58px; }
+body.phone-mode.portrait .pbar { flex-wrap: wrap; padding: 4px 6px; row-gap: 4px; }
+body.phone-mode.portrait .pphases { order: 9; flex-basis: 100%; }
+body.phone-mode.portrait .pbar .spacer-p { flex: 1; }
+body.phone-mode.portrait .phone.log-on .pwatch, body.phone-mode.portrait .phone.log-on .pwatch.mine { grid-template-columns: 120px minmax(0, 1fr); }
+body.phone-mode.portrait .phone.log-on .pwatch:not(.mine) { grid-template-columns: 120px minmax(0, 1fr) 64px; }
+body.phone-mode.portrait .sheet-body { flex-direction: column; }
+body.phone-mode.portrait .sheet-left { max-height: 42%; }
+body.phone-mode.portrait .sheet-card img { height: 100%; max-height: 38vh; }
+body.phone-mode.portrait .sheet-card .psum { width: auto; flex: 1; }
+body.phone-mode.portrait .sheet-items { width: auto; margin-left: 0; flex: 1; min-height: 0; }
+body.phone-mode.portrait .pzones { flex-wrap: wrap; }
+body.phone-mode.portrait .pzone { flex-basis: 40%; }
+body.phone-mode.portrait .pgrid { grid-template-columns: 1fr; grid-auto-rows: 1fr; }
+body.phone-mode.portrait .pgrid .pcell { grid-area: auto !important; }
+/* keep columns fixed when the log column is hidden */
+.pwatch > .plog { grid-column: 1; grid-row: 1; }
+.pwatch > .pslot { grid-column: 2; grid-row: 1; }
+.pwatch > .pside { grid-column: 3; grid-row: 1; }
+/* phone combat: boxes grow with their columns; the area scrolls instead of overflowing */
+.pcb-main { overflow: auto; align-items: flex-start; --cbw: 54px; }
+.pcb-main .cb-target { flex-shrink: 0; min-height: 100%; height: auto; }
+.pcb-main .cb-cols { flex: none; overflow: visible; }
+body.phone-mode:not(.portrait) .pcb-head { padding-top: 8px; padding-right: 50%; }
+.phone:not(.no-piles) .plife { right: 96px; }

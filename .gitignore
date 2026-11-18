@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+# game backups you download
+mtg-game-*.json

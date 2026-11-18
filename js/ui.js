@@ -24,6 +24,32 @@
   const VIEW_KEY = 'mtgtt.boardView';
   const BOLT = '<svg viewBox="0 0 16 16" class="ic"><path d="M9.5 1 3 9h4l-1 6 6.5-8h-4z" fill="currentColor"/></svg>';
   const SPARK = '<svg viewBox="0 0 16 16" class="ic"><path d="M8 1l1.6 5.4L15 8l-5.4 1.6L8 15l-1.6-5.4L1 8l5.4-1.6z" fill="currentColor"/></svg>';
+  const ic = (d, extra = '') => `<svg viewBox="0 0 24 24" class="mic" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ${extra}>${d}</svg>`;
+  const ICONS = {
+    field: ic('<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 12h18M12 3v18"/>'),
+    zones: ic('<rect x="4" y="6" width="12" height="15" rx="2"/><path d="M8 3h10a2 2 0 0 1 2 2v13"/>'),
+    eye: ic('<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>'),
+    grid: ic('<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>'),
+    log: ic('<path d="M4 6h16M4 12h16M4 18h10"/>'),
+    zoomIn: ic('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/>'),
+    zoomOut: ic('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6"/>'),
+    fit: ic('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
+    die: ic('<path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M12 7l5 9H7z"/>'),
+    token: ic('<circle cx="12" cy="12" r="9"/><path d="M12 7l1.5 3.2 3.5.4-2.6 2.4.7 3.5L12 14.8 8.9 16.5l.7-3.5L7 10.6l3.5-.4z"/>'),
+    prolif: ic('<path d="M21 12a9 9 0 0 1-15.5 6.2M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18 2v4h-4M6 22v-4h4"/>'),
+    undo: ic('<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/>'),
+    untap: ic('<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>'),
+    deck: ic('<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 2h9a2 2 0 0 1 2 2v14"/>'),
+    play: ic('<path d="M7 4l13 8-13 8z"/>'),
+    link: ic('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
+    gear: ic('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.2-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 2.9-1.2V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
+    help: ic('<circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/>'),
+    leave: ic('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>'),
+    sword: ic('<path d="M14.5 17.5L3 6V3h3l11.5 11.5M13 19l6-6M16 16l4 4M19 21l2-2"/>'),
+    hand: ic('<rect x="3" y="6" width="9" height="13" rx="1.5" transform="rotate(-10 7 12)"/><rect x="11" y="5" width="9" height="13" rx="1.5" transform="rotate(8 15 11)"/>'),
+    library: ic('<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 7h6"/>'),
+    back: ic('<path d="M15 18l-6-6 6-6"/>'),
+  };
   const D20_SVG =
     '<svg viewBox="0 0 100 100" class="d20svg"><polygon points="50,3 93,27 93,73 50,97 7,73 7,27" class="d-out"/>' +
     '<polygon points="50,24 79,71 21,71" class="d-in"/>' +
@@ -1239,45 +1265,39 @@
     render();
   }
 
+  /**
+   * One attacker's column. Your own creatures are always nearest you:
+   * attacking → blockers come from above; defending → the attacker comes from above.
+   */
   function combatColumnHTML(at, cb) {
     const iAttack = cb.attacker === S.you;
     const iDefend = at.defender === S.you;
     const att = S.cards[at.cardId];
     const mods = at.mods
-      .map((m, i) => `<button class="cb-mod" data-cb="mod" data-at="${at.id}" data-i="${i}" title="Click to move or remove">${m.op === 'x' ? `×${m.n}` : sign(m.n)}</button>`)
+      .map((m, i) => `<button class="cb-mod" data-cb="mod" data-at="${at.id}" data-i="${i}" title="Tap to re-order or remove">${m.op === 'x' ? `×${m.n}` : sign(m.n)}</button>`)
       .join('<span class="cb-arrow">→</span>');
     const blockers = at.blockers
       .map(
         (bid, i) => `<div class="cb-blocker">${S.cards[bid] ? cardHTML(S.cards[bid], 'combat') : ''}
-          <div class="cb-bbtns">${iAttack || iDefend ? `<button class="btn tiny" data-cb="bup" data-at="${at.id}" data-i="${i}" title="Earlier">▲</button><button class="btn tiny" data-cb="bdown" data-at="${at.id}" data-i="${i}" title="Later">▼</button>` : ''}
-          ${iDefend ? `<button class="btn tiny" data-cb="unblock" data-card="${bid}" title="Stop blocking">✕</button>` : ''}</div></div>`,
+          ${(iAttack || iDefend) && at.blockers.length > 1 ? `<div class="cb-bbtns"><button class="btn tiny" data-cb="bup" data-at="${at.id}" data-i="${i}" title="Earlier">‹</button><button class="btn tiny" data-cb="bdown" data-at="${at.id}" data-i="${i}" title="Later">›</button></div>` : ''}
+          ${iDefend ? `<button class="btn tiny cb-x" data-cb="unblock" data-card="${bid}" title="Stop blocking">✕</button>` : ''}</div>`,
       )
       .join('');
+    const blockSec = `<div class="cb-blockers">${blockers || `<div class="cb-noblock">${iDefend ? 'drop a blocker' : 'unblocked'}</div>`}</div>`;
+    const attSec = `<div class="cb-att">${att ? cardHTML(att, 'combat') : ''}${iAttack ? `<button class="btn tiny cb-x" data-cb="unattack" data-at="${at.id}" title="Stop attacking">✕</button>` : ''}</div>`;
     return `<div class="cb-col" data-drop="block" data-attack="${at.id}">
-      <div class="cb-dmg" title="Damage this creature deals if it connects">${at.dmg == null ? '?' : at.dmg}</div>
+      <div class="cb-dmg" title="Damage if it connects">${at.dmg == null ? '?' : at.dmg}</div>
       ${mods ? `<div class="cb-mods">${mods}</div>` : ''}
-      <div class="cb-att">${att ? cardHTML(att, 'combat') : ''}${iAttack ? `<button class="btn tiny cb-x" data-cb="unattack" data-at="${at.id}" title="Stop attacking">✕</button>` : ''}</div>
-      <div class="cb-blockers">${blockers || `<div class="cb-noblock muted small">${iDefend ? 'Drag a creature here to block' : 'Unblocked'}</div>`}</div>
+      ${iAttack ? blockSec + attSec : attSec + blockSec}
       ${iAttack ? `<div class="cb-btns"><button class="btn tiny" data-cb="plus" data-at="${at.id}">+X</button><button class="btn tiny" data-cb="times" data-at="${at.id}">×N</button>${at.mods.length ? `<button class="btn tiny" data-cb="reset" data-at="${at.id}">reset</button>` : ''}</div>` : ''}
     </div>`;
   }
 
-  function renderCombat() {
-    const box = $('#combat');
+  /** Targets (player + their planeswalkers/battles) with their columns. Shared by computer and phone. */
+  function combatTargetsHTML(def) {
     const cb = S.combat;
-    const isActive = S.turn.active === S.you;
-    $('#btn-combat').hidden = !isActive || !!cb;
-    if (!cb || U.phone) {
-      box.hidden = true;
-      box.innerHTML = '';
-      return;
-    }
-    box.hidden = false;
-    const def = currentCombatDef();
     const defP = playerById(def);
-    const attP = playerById(cb.attacker);
     const iAttack = cb.attacker === S.you;
-    const inIt = cb.participants.includes(S.you);
     const targets = [{ kind: 'player', id: def }];
     for (const id of defP ? defP.zones.battlefield : []) {
       const c = S.cards[id];
@@ -1285,38 +1305,99 @@
     }
     const atFor = (t) => cb.attacks.filter((a) => a.target.kind === t.kind && a.target.id === t.id);
     const total = (list) => list.reduce((s, a) => s + (a.dmg || 0), 0);
-    const playerTotal = total(atFor(targets[0]));
-    const ready = cb.participants
-      .map((id) => {
-        const p = playerById(id);
-        return `<span class="cb-chip ${cb.done[id] ? 'ok' : ''}">${esc(p ? (id === S.you ? 'You' : p.name) : '?')} ${cb.done[id] ? '✓' : '…'}</span>`;
+    const html = targets
+      .map((t) => {
+        const list = atFor(t);
+        const cols = list.map((a) => combatColumnHTML(a, cb)).join('');
+        if (t.kind === 'player')
+          return `<div class="cb-target player" data-drop="attack" data-tkind="player" data-tid="${t.id}" style="flex:${Math.max(2, list.length + 1)} 1 0">
+            <div class="cb-tlabel"><span class="dot" style="background:${esc(defP ? defP.color : '#888')}"></span>${esc(def === S.you ? 'You' : defP ? defP.name : '?')}
+              <span class="muted">${defP ? defP.life : '?'} life</span><span class="cb-sum" title="Damage at the player if everything connects">${total(list)}</span></div>
+            <div class="cb-cols">${cols || `<div class="cb-empty">${iAttack ? 'drop attackers here' : 'no attackers'}</div>`}</div></div>`;
+        const pw = S.cards[t.id];
+        // planeswalkers / battles use their card as the header; their area grows with each attacker
+        return `<div class="cb-target pw" data-drop="attack" data-tkind="pw" data-tid="${t.id}" style="flex:${list.length || 0.01} 0 auto">
+          <div class="cb-pwhead">${cardHTML(pw, 'combat')}<span class="cb-sum">${total(list)}</span></div>
+          <div class="cb-cols">${cols}</div></div>`;
       })
       .join('');
+    return { html, playerTotal: total(atFor(targets[0])) };
+  }
+
+  /** Creatures you could still attack or block with (computer overlay's bottom row). */
+  function combatAvailable() {
+    const cb = S.combat;
+    const mine = me();
+    if (!mine) return [];
+    const iAttack = cb.attacker === S.you;
+    const defending = cb.attacks.some((a) => a.defender === S.you);
+    if (!iAttack && !defending) return [];
+    const busy = new Set(iAttack ? cb.attacks.map((a) => a.cardId) : cb.attacks.flatMap((a) => a.blockers));
+    return mine.zones.battlefield.map((id) => S.cards[id]).filter((c) => c && !c.hidden && /\bCreature\b/.test(c.typeLine || '') && !c.tapped && !busy.has(c.id));
+  }
+
+  function combatBarHTML(playerTotal) {
+    const cb = S.combat;
+    const iAttack = cb.attacker === S.you;
+    const inIt = cb.participants.includes(S.you);
+    const ready = cb.participants
+      .map((id) => `<span class="cb-chip ${cb.done[id] ? 'ok' : ''}">${esc(id === S.you ? 'You' : (playerById(id) || {}).name || '?')} ${cb.done[id] ? '✓' : '…'}</span>`)
+      .join('');
+    return `<span class="cb-total">Total <b>${playerTotal}</b></span><span class="cb-ready">${ready}</span><span class="spacer"></span>
+      ${U.phone ? '' : '<button class="btn small" data-cb="hide">View field</button>'}
+      ${iAttack && !U.phone ? '<button class="btn small ghost" data-cb="cancel">Cancel combat</button>' : ''}
+      ${inIt ? `<button class="btn ${cb.done[S.you] ? '' : 'primary'} cb-donebtn" data-cb="done">${cb.done[S.you] ? 'Not done yet' : 'Done ✓'}</button>` : ''}`;
+  }
+
+  let combatHidden = false;
+  let lastCombatKey = null;
+
+  /** Computer: combat is a see-through layer over the whole table. */
+  function renderCombat() {
+    const box = $('#combat');
+    const cb = S.combat;
+    const isActive = S.turn.active === S.you;
+    $('#btn-combat').hidden = !isActive || !!cb;
+    const key = cb ? cb.attacker : null;
+    if (key !== lastCombatKey) combatHidden = false; // a new combat always opens the overlay
+    lastCombatKey = key;
+    let back = $('#combat-back');
+    if (!cb || U.phone) {
+      box.hidden = true;
+      box.innerHTML = '';
+      if (back) back.hidden = true;
+      return;
+    }
+    if (!back) {
+      back = document.createElement('button');
+      back.id = 'combat-back';
+      back.className = 'btn primary combat-back';
+      back.innerHTML = `${ICONS.sword}<span>Back to combat</span>`;
+      back.addEventListener('click', () => {
+        combatHidden = false;
+        render();
+      });
+      document.body.appendChild(back);
+    }
+    box.hidden = combatHidden;
+    back.hidden = !combatHidden;
+    if (combatHidden) return;
+    const def = currentCombatDef();
+    const defP = playerById(def);
+    const attP = playerById(cb.attacker);
     const defs = combatDefenders();
-    box.innerHTML = `<div class="cb-head">
-        <b>⚔ ${esc(iAttack ? 'You are' : `${attP ? attP.name : '?'} is`)} attacking</b>
-        ${defs.length > 1 ? '<button class="btn tiny" data-cb="prev">◀</button>' : ''}
-        <span class="cb-def">${esc(def === S.you ? 'you' : defP ? defP.name : '?')}</span>
-        ${defs.length > 1 ? '<button class="btn tiny" data-cb="next">▶</button>' : ''}
-        <span class="cb-total" title="Total damage at the player if everything connects">Total: <b>${playerTotal}</b></span>
-        <span class="spacer"></span>
-        <span class="cb-ready">${ready}</span>
-        ${inIt ? `<button class="btn small ${cb.done[S.you] ? '' : 'primary'}" data-cb="done">${cb.done[S.you] ? 'Not done yet' : 'Done ✓'}</button>` : ''}
-        ${iAttack ? '<button class="btn small ghost" data-cb="cancel">Cancel combat</button>' : ''}
+    const t = combatTargetsHTML(def);
+    const avail = combatAvailable();
+    const iAttack = cb.attacker === S.you;
+    box.className = 'combat combat-ov';
+    box.innerHTML = `<div class="cbo-top">
+        ${defs.length > 1 ? '<button class="btn small" data-cb="prev">◀</button>' : ''}
+        <span>${esc(iAttack ? 'You' : attP ? attP.name : '?')} attacking <b>${esc(def === S.you ? 'you' : defP ? defP.name : '?')}</b></span>
+        ${defs.length > 1 ? '<button class="btn small" data-cb="next">▶</button>' : ''}
       </div>
-      <div class="cb-body">${targets
-        .map((t) => {
-          const list = atFor(t);
-          const label =
-            t.kind === 'player'
-              ? `<span class="dot" style="background:${esc(defP ? defP.color : '#888')}"></span>${esc(def === S.you ? 'You' : defP ? defP.name : '?')} ♥ ${defP ? defP.life : '?'}`
-              : `${esc(S.cards[t.id].name)} <span class="loyal-inline">${(S.cards[t.id].counters || {}).loyalty != null ? S.cards[t.id].counters.loyalty : esc(S.cards[t.id].loyalty || '?')}</span>`;
-          return `<div class="cb-target ${t.kind}" data-drop="attack" data-tkind="${t.kind}" data-tid="${t.id}">
-            <div class="cb-tlabel">${label}${t.kind === 'pw' ? ` · <b>${total(list)}</b>` : ''}</div>
-            <div class="cb-cols">${list.map((a) => combatColumnHTML(a, cb)).join('') || `<div class="cb-empty muted small">${iAttack ? 'Drag attackers here' : 'No attackers'}</div>`}</div>
-          </div>`;
-        })
-        .join('')}</div>`;
+      <div class="cbo-main">${t.html}</div>
+      ${avail.length ? `<div class="cbo-avail"><span class="cbo-lbl">${iAttack ? 'Drag up to attack' : 'Drag up to block'}</span><div class="cbo-cards">${avail.map((c) => cardHTML(c, 'avail')).join('')}</div></div>` : ''}
+      <div class="cbo-bar">${combatBarHTML(t.playerTotal)}</div>`;
   }
 
   $('#combat').addEventListener('click', (e) => combatClick(e));
@@ -1326,6 +1407,9 @@
     if (!b || !S.combat) return;
     const at = S.combat.attacks.find((a) => a.id === b.dataset.at);
     switch (b.dataset.cb) {
+      case 'hide':
+        combatHidden = true;
+        return render();
       case 'prev':
         return switchCombatDef(-1);
       case 'next':
@@ -1823,7 +1907,8 @@
       }
       const b = document.createElement('button');
       b.className = `mi ${it.disabled ? 'disabled' : ''} ${it.cls || ''}`;
-      b.textContent = it.label;
+      if (it.icon) b.innerHTML = `${it.icon}<span>${esc(it.label)}</span>`;
+      else b.textContent = it.label;
       b.addEventListener('click', () => {
         m.hidden = true;
         it.fn();
@@ -2662,6 +2747,8 @@
         <label class="row gap"><input type="checkbox" id="st-draw" ${st.autoDraw ? 'checked' : ''}> Draw automatically when a turn passes</label>
         <label class="row gap">Starting life <input type="number" id="st-life" value="${st.startingLife}" style="width:80px"></label>
         <div class="sect-title">This device</div>
+        <label class="row gap"><input type="checkbox" id="st-arrows" ${Store.get('mtgtt.phoneArrows') === false ? '' : 'checked'}> Phone: show the map arrows</label>
+        <label class="row gap"><input type="checkbox" id="st-piles" ${Store.get('mtgtt.phonePiles') === false ? '' : 'checked'}> Phone: show library &amp; graveyard at the side</label>
         <label class="row gap">Layout <select id="st-layout">
           <option value="auto" ${pref === 'auto' ? 'selected' : ''}>Automatic (phone layout on touch screens)</option>
           <option value="phone" ${pref === 'phone' ? 'selected' : ''}>Phone / touch layout</option>
@@ -2699,6 +2786,9 @@
       const d = root.querySelector('#st-draw').checked;
       const l = Number.parseInt(root.querySelector('#st-life').value, 10);
       const layout = root.querySelector('#st-layout').value;
+      Store.set('mtgtt.phoneArrows', root.querySelector('#st-arrows').checked);
+      Store.set('mtgtt.phonePiles', root.querySelector('#st-piles').checked);
+      render();
       if (u !== st.autoUntap) await act({ type: 'setting', key: 'autoUntap', value: u });
       if (d !== st.autoDraw) await act({ type: 'setting', key: 'autoDraw', value: d });
       if (Number.isFinite(l) && l !== st.startingLife) await act({ type: 'setting', key: 'startingLife', value: l });
@@ -2720,10 +2810,13 @@
         <b>Battlefield</b><span>Drag to look around, pinch to zoom. Tap a land to tap it. Tap anything else for its options. Hold a card, then drag to move it. Hold and let go for the menu.</span>
         <b>Stack</b><span>Tap a spell on the stack for Resolves / Doesn't resolve.</span>
         <b>Moving cards</b><span>While dragging, Graveyard / Exile / Hand / Library / Command targets appear at the sides of the screen.</span>
-        <b>Combat</b><span>Tap the Combat phase. Use ▲ ▼ ◀ ▶ to move between your battlefield, the combat zone(s) and opponents. Drag creatures to the top edge to attack (or block), or tap the combat zone.</span>
-        <b>Library</b><span>Tap it (in ☰ → My zones) for the menu, double-tap to draw.</span>
-        <b>Menu ☰</b><span>Zones (library, graveyard, exile, command), opponents' battlefields, log, zoom, d20, tokens, proliferate, undo and settings.</span>
-        <b>Phases</b><span>Tap the phases along the top as you go. Pass turn is at the end.</span>
+        <b>Getting around</b><span>The ▲ ▼ ◀ ▶ buttons move between your battlefield, opponents (in turn order) and, during combat, the combat zone. <i>Current player</i> at the top jumps to whoever's turn it is; <i>Return</i> brings you back.</span>
+        <b>Combat</b><span>Tap the Combat phase. Drag creatures to the top edge to attack (or block), or tap the combat zone. Done is in the bar at the bottom.</span>
+        <b>Library &amp; graveyard</b><span>They peek in from the right edge. Tap the library for its menu, double-tap to draw. <i>Other zones</i> shows exile and the command zone.</span>
+        <b>Life</b><span>Tap a life badge. Slide right for damage, left for gain, ±1 to fine-tune; it's applied when you close the window (Undo fixes mistakes).</span>
+        <b>Log</b><span>The Log button at the top shows the log beside the battlefield.</span>
+        <b>Menu ☰</b><span>All battlefields, zoom, d20, tokens, proliferate, undo and settings (hide the arrows or the side piles there).</span>
+        <b>Phases</b><span>Tap the phases along the top as you go. Pass turn is at the end. Portrait or landscape both work.</span>
       </div>`
         : `<div class="help-grid">
         <b>Move cards</b><span>Drag them anywhere: battlefield, hand (drop between cards to sort), the stack, your piles, or another player's battlefield.</span>
@@ -2735,7 +2828,7 @@
         <b>Effects</b><span>Right-click → Effects… to set up what a card does (anthems, "for each" bonuses, extra counters, keywords). Totals update automatically.</span>
         <b>Library</b><span>Click for the menu (draw, mill, peek, reveal until…, search, shuffle). Double-click (or <kbd>D</kbd>) to draw.</span>
         <b>Counters</b><span>Right-click a permanent → Counters…: type numbers or use ± and press Save (✕ throws changes away). Permanents with counters show them when right-clicked.</span>
-        <b>Combat</b><span>Click the Combat phase (or ⚔ Combat). Drag attackers into the combat box (onto the player or a planeswalker); defenders drag blockers onto a column. +X / ×N change a column's damage; everyone presses Done when ready.</span>
+        <b>Combat</b><span>Click the Combat phase (or Combat). Drag creatures up from the bottom row onto the player or a planeswalker; defenders drag blockers onto a column. <i>View field</i> hides the combat screen for a moment. +X / ×N change a column's damage; everyone presses Done when ready.</span>
         <b>Reactions</b><span>Hover a chat or log line and click ☺︎+.</span>
         <b>Opponents' stuff</b><span>Changing anything on another player's battlefield, hand, library or life asks them first.</span>
         <b>Battlefields</b><span>Wheel zooms, drag an empty spot to scroll. "All battlefields" shows everyone in turn order.</span>
@@ -3098,7 +3191,8 @@
     dieEl, animateDie, trackFlick, randomFlick, D20_SVG,
     leaveGame, copyInvite, startGameClick, playFromHand, resolveStack, isLandCard, handIndexAt, isEquipLike,
     paneLayout, fitTray, fitView, viewCenter, cardsBox, openCounterPanel, closeCounterPanel, libraryClick, revealDialog,
-    combatInfo, combatColumnHTML, combatDrop, combatDefenders, cardHTML, DEFAULT_Z, combatClick, setCombatDef, currentCombatDef, switchCombatDef,
+    ICONS,
+    combatInfo, combatColumnHTML, combatTargetsHTML, combatBarHTML, combatDrop, combatDefenders, cardHTML, DEFAULT_Z, combatClick, setCombatDef, currentCombatDef, switchCombatDef,
   };
   window.MTGUI = U;
 
