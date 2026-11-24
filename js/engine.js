@@ -48,6 +48,16 @@ const fail = (msg) => { throw new GameError(msg); };
 
 /* ---------------------------------------------------------------- helpers */
 
+function fmtDuration(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
 /** Shuffle a player's library and bump a counter so everyone sees the shuffle animation. */
 function shuffleLibrary(p) {
   shuffle(p.zones.library);
@@ -192,6 +202,9 @@ function newPlayer(game, name) {
     deckName: null,
     deck: null,
     bfColor: null,
+    out: false,
+    autoStack: false,
+    stacks: {}, // land/artifact stacks: id -> [card ids], front card first
     zones: {},
   };
   for (const z of PLAYER_ZONES) p.zones[z] = [];
@@ -265,6 +278,7 @@ function matchesExtra(card, e) {
   }
   if (e.mvOp) {
     if (card.cmc == null) return false;
+    if (e.mvOp === '<' && !(card.cmc < e.mv)) return false;
     if (e.mvOp === '<=' && !(card.cmc <= e.mv)) return false;
     if (e.mvOp === '=' && card.cmc !== e.mv) return false;
     if (e.mvOp === '>=' && !(card.cmc >= e.mv)) return false;
@@ -276,7 +290,17 @@ function extraText(e) {
   return { color: e.color ? `${COLOR_WORD[e.color]} ` : '', mv };
 }
 const WHERE = ['you', 'opp', 'all', 'yourGraveyard'];
-const KINDS = ['pt', 'forEach', 'etb', 'keyword'];
+const KINDS = ['pt', 'forEach', 'etb', 'keyword', 'type'];
+const OPS = ['<=', '=', '>='];
+function cleanStatFilters(e, eff, pre) {
+  const kw = str(String(e[`${pre}kw`] || '').trim().toLowerCase(), 30);
+  if (kw) eff[`${pre}kw`] = kw;
+  for (const st of ['p', 't'])
+    if (OPS.includes(e[`${pre}${st}Op`]) && e[`${pre}${st}N`] !== '' && e[`${pre}${st}N`] != null && Number.isFinite(Number(e[`${pre}${st}N`]))) {
+      eff[`${pre}${st}Op`] = e[`${pre}${st}Op`];
+      eff[`${pre}${st}N`] = int(e[`${pre}${st}N`], -99, 99, 0);
+    }
+}
 
 /** Effects are small structured rules a player builds (or approves) for a card. */
 function cleanEffects(list) {
@@ -285,9 +309,10 @@ function cleanEffects(list) {
   for (const e of list.slice(0, 12)) {
     if (!e || !KINDS.includes(e.kind)) continue;
     const eff = { kind: e.kind, on: e.on !== false };
-    if (e.kind === 'pt' || e.kind === 'etb' || e.kind === 'keyword') {
+    if (e.kind === 'pt' || e.kind === 'etb' || e.kind === 'keyword' || e.kind === 'type' || e.kind === 'forEach') {
       eff.who = WHO.includes(e.who) ? e.who : 'self';
       eff.filter = str(String(e.filter || '').trim(), 30);
+      cleanStatFilters(e, eff, '');
     }
     if (COLOR_FILTERS.includes(e.color)) eff.color = e.color;
     if (['<=', '=', '>='].includes(e.mvOp) && e.mv !== '' && e.mv !== null && e.mv !== undefined && Number.isFinite(Number(e.mv))) {
@@ -302,11 +327,19 @@ function cleanEffects(list) {
       eff.count = str(String(e.count || 'creature').trim(), 30) || 'creature';
       eff.where = WHERE.includes(e.where) ? e.where : 'you';
       eff.other = !!e.other;
+      eff.shares = !!e.shares;
+      cleanStatFilters(e, eff, 'c');
     }
     if (e.kind === 'etb') {
-      eff.n = int(e.n, 1, 20, 1);
+      eff.nFrom = e.nFrom === 'power' ? 'power' : '';
+      eff.n = int(e.n, 0, 20, 1);
       eff.counter = str(String(e.counter || '+1/+1').trim(), 20) || '+1/+1';
+      const ty = str(String(e.typeAdd || '').trim(), 30);
+      if (ty) eff.typeAdd = ty;
+      if (!eff.n && !eff.nFrom && !eff.typeAdd) continue;
     }
+    if (e.kind === 'type') eff.typeAdd = str(String(e.typeAdd || '').trim(), 30);
+    if (e.kind === 'type' && !eff.typeAdd) continue;
     if (e.kind === 'keyword') eff.keyword = str(String(e.keyword || '').trim(), 30);
     if (e.kind === 'keyword' && !eff.keyword) continue;
     if (e.note) eff.note = str(e.note, 80);
@@ -327,21 +360,38 @@ const WHERE_TEXT = { you: 'you control', opp: 'your opponents control', all: 'on
 
 /** Human-readable sentence for an effect, e.g. "Other Elf creatures you control get +1/+1". */
 function describeEffect(e) {
+  const statText = (pre) => {
+    const bits = [];
+    if (e[`${pre}kw`]) bits.push(`with ${e[`${pre}kw`]}`);
+    const opw = { '<=': 'or less', '>=': 'or greater', '=': '' };
+    if (e[`${pre}pOp`]) bits.push(`with power ${e[`${pre}pN`]}${opw[e[`${pre}pOp`]] ? ` ${opw[e[`${pre}pOp`]]}` : ''}`);
+    if (e[`${pre}tOp`]) bits.push(`with toughness ${e[`${pre}tN`]}${opw[e[`${pre}tOp`]] ? ` ${opw[e[`${pre}tOp`]]}` : ''}`);
+    return bits.length ? ` ${bits.join(' and ')}` : '';
+  };
   const who = () => {
     if (e.who === 'self' || e.who === 'attached' || !WHO_TEXT[e.who]) return WHO_TEXT[e.who] || 'This creature';
     const [pre, rest] = { yours: ['', 'creatures you control'], yoursOther: ['other ', 'creatures you control'], opponents: ['', 'creatures your opponents control'], all: ['all ', 'creatures'] }[e.who];
-    const x = extraText(e);
-    const out = `${pre}${x.color}${e.filter ? `${e.filter} ` : ''}${rest}${x.mv}`;
+    const x = e.kind === 'forEach' ? { color: '', mv: '' } : extraText(e);
+    const out = `${pre}${x.color}${e.filter ? `${e.filter} ` : ''}${rest}${x.mv}${statText('')}`;
     return out[0].toUpperCase() + out.slice(1);
   };
-  const plural = e.who !== 'self' && e.who !== 'attached';
+  const plural = !!e.who && e.who !== 'self' && e.who !== 'attached';
   switch (e.kind) {
     case 'pt':
       return `${who()} ${plural ? 'get' : 'gets'} ${sign(e.p)}/${sign(e.t)}`;
-    case 'forEach':
-      return `This creature gets ${sign(e.p)}/${sign(e.t)} for each ${e.other ? 'other ' : ''}${extraText(e).color}${e.count}${extraText(e).mv} ${WHERE_TEXT[e.where]}`;
-    case 'etb':
-      return `${who()} ${plural ? 'enter' : 'enters'} with ${e.n} extra ${e.counter} counter${e.n === 1 ? '' : 's'}`;
+    case 'forEach': {
+      const rel = e.who === 'self' ? 'it' : 'that creature';
+      return `${who()} ${plural ? 'get' : 'gets'} ${sign(e.p)}/${sign(e.t)} for each ${e.other ? 'other ' : ''}${extraText(e).color}${e.count}${extraText(e).mv}${statText('c')} ${WHERE_TEXT[e.where]}${e.shares ? ` that shares a creature type with ${rel}` : ''}`;
+    }
+    case 'etb': {
+      const bits = [];
+      if (e.nFrom === 'power') bits.push(`X extra ${e.counter} counters, where X is this card's power`);
+      else if (e.n) bits.push(`${e.n} extra ${e.counter} counter${e.n === 1 ? '' : 's'}`);
+      const tail = e.typeAdd ? `${bits.length ? ', and' : ''} as ${/^[aeiou]/i.test(e.typeAdd) ? 'an' : 'a'} ${e.typeAdd} in addition to ${plural ? 'their' : 'its'} other types` : '';
+      return `${who()} ${plural ? 'enter' : 'enters'}${bits.length ? ` with ${bits.join('')}` : ''}${tail}`;
+    }
+    case 'type':
+      return `${who()} ${plural ? 'are' : 'is'} ${/^[aeiou]/i.test(e.typeAdd) ? 'an' : 'a'} ${e.typeAdd} in addition to ${plural ? 'their' : 'its'} other types`;
     case 'keyword':
       return `${who()} ${plural ? 'have' : 'has'} ${e.keyword}`;
     default:
@@ -428,6 +478,7 @@ function placeIn(game, card, zone, pid, opts = {}) {
 }
 
 function destroyCard(game, card) {
+  if (card.zone === 'battlefield') unstack(game, card);
   detach(game, card);
   delete game.cards[card.id];
 }
@@ -437,6 +488,56 @@ function removeOwnedCards(game, pid) {
 }
 
 const currentType = (card) => (card.flipped && card.backTypeLine ? card.backTypeLine : card.typeLine) || '';
+let GRANTED = null; // card id -> [types] granted by effects, filled in while computing stats
+const extraTypesOf = (card) => (card.extraTypes || []).concat((GRANTED && GRANTED.get(card.id)) || []);
+/** Creature types (the words after the dash), plus any gained ones. */
+function creatureTypes(card) {
+  const tl = currentType(card);
+  const sub = tl.includes('—') ? tl.split('—')[1] : '';
+  const out = new Set(sub.split(/\s+/).map((w) => w.trim().toLowerCase()).filter(Boolean));
+  for (const t of extraTypesOf(card)) out.add(String(t).toLowerCase());
+  return out;
+}
+const isChangeling = (card) => /\bchangeling\b/i.test(card.oracle || '');
+/** Do two creatures share at least one creature type (Coat of Arms)? */
+function sharesCreatureType(a, b) {
+  const ta = creatureTypes(a);
+  const tb = creatureTypes(b);
+  if ((isChangeling(a) && tb.size) || (isChangeling(b) && ta.size) || (isChangeling(a) && isChangeling(b))) return true;
+  for (const t of ta) if (tb.has(t)) return true;
+  return false;
+}
+/** Keywords printed on the card (no effects, so it can be used inside effect maths). */
+function printedKeywords(card) {
+  const out = new Set();
+  const text = card.flipped && card.backOracle ? card.backOracle : card.oracle || '';
+  for (const line of text.split('\n')) {
+    const parts = line.replace(/\([^)]*\)/g, '').split(',').map((x) => x.trim().toLowerCase().replace(/\.$/, ''));
+    if (parts.length && parts.every((p) => KEYWORD_LIST.includes(p) || /^(ward|protection from|equip|enchant)\b/.test(p))) for (const p of parts) out.add(p);
+  }
+  return out;
+}
+/** Power/toughness from the card itself, counters and manual bonuses (no effects). */
+function plainPT(card) {
+  const base = parsePT(card.flipped && card.backPt ? card.backPt : card.pt);
+  if (!base || base.p == null || base.t == null) return null;
+  const net = (card.counters['+1/+1'] || 0) - (card.counters['-1/-1'] || 0);
+  const m = card.ptMod || { p: 0, t: 0 };
+  return { p: base.p + net + (m.p || 0), t: base.t + net + (m.t || 0) };
+}
+const cmpOk = (v, op, n) => (op === '<=' ? v <= n : op === '>=' ? v >= n : op === '=' ? v === n : true);
+/** Keyword and power/toughness filters (prefix '' for who gets it, 'c' for what's counted). */
+function matchesStatFilters(card, e, pre = '') {
+  const kw = e[`${pre}kw`];
+  if (kw && !printedKeywords(card).has(kw.toLowerCase())) return false;
+  for (const st of ['p', 't']) {
+    const op = e[`${pre}${st}Op`];
+    if (!op) continue;
+    const pt = plainPT(card);
+    if (!pt || !cmpOk(pt[st], op, e[`${pre}${st}N`])) return false;
+  }
+  return true;
+}
 function isLand(card) {
   return /\bLand\b/.test(currentType(card)) && !/\bCreature\b/.test(currentType(card));
 }
@@ -448,7 +549,7 @@ function hasType(card, word) {
   if (!word) return true;
   let w = word.trim().toLowerCase();
   if (w === 'card' || w === 'permanent') return true;
-  const tl = currentType(card).toLowerCase();
+  const tl = `${currentType(card)} ${extraTypesOf(card).join(' ')}`.toLowerCase();
   const re = (x) => new RegExp(`(^|[^a-z])${x.replace(/[^a-z' -]/g, '')}([^a-z]|$)`);
   if (re(w).test(tl)) return true;
   const singular = w.endsWith('ves') ? w.slice(0, -3) + 'f' : w.endsWith('ies') ? w.slice(0, -3) + 'y' : w.endsWith('s') ? w.slice(0, -1) : w;
@@ -517,6 +618,96 @@ function resetCardState(card) {
   card.note = '';
   card.ptMod = { p: 0, t: 0 };
   card.attachedTo = null;
+  card.extraTypes = [];
+}
+
+/* ------------------------------------------------- land / artifact stacks */
+
+const STACK_STEP = 22; // how much of each card behind the front one shows (its name bar)
+const stackable = (card) => /\b(Land|Artifact)\b/.test(currentType(card));
+function stackOf(game, card) {
+  const p = getPlayer(game, card.zp);
+  if (!p || !p.stacks) return null;
+  for (const [sid, arr] of Object.entries(p.stacks)) if (arr.includes(card.id)) return { p, sid, arr };
+  return null;
+}
+/** Line the stack up above its front card and keep the back cards drawn behind it. */
+function layoutStack(game, p, sid, anchor) {
+  const arr = (p.stacks[sid] || []).filter((id) => game.cards[id] && game.cards[id].zone === 'battlefield' && game.cards[id].zp === p.id);
+  if (arr.length < 2) {
+    delete p.stacks[sid];
+    return;
+  }
+  p.stacks[sid] = arr;
+  const front = game.cards[arr[0]];
+  if (anchor) {
+    front.x = anchor.x;
+    front.y = anchor.y;
+  }
+  front.x = Math.max(0, Math.min(TABLE_W - CARD_W, front.x));
+  front.y = Math.max((arr.length - 1) * STACK_STEP, Math.min(TABLE_H - CARD_H, front.y));
+  arr.forEach((id, k) => {
+    const c = game.cards[id];
+    c.x = front.x;
+    c.y = front.y - k * STACK_STEP;
+  });
+  const bf = p.zones.battlefield;
+  for (const id of arr) bf.splice(bf.indexOf(id), 1);
+  for (let k = arr.length - 1; k >= 0; k--) bf.push(arr[k]);
+}
+/** Take a card out of its stack. A card from the middle splits the stack in two. */
+function unstack(game, card) {
+  const st = stackOf(game, card);
+  if (!st) return;
+  const { p, sid, arr } = st;
+  const i = arr.indexOf(card.id);
+  const front = game.cards[arr[0]];
+  const anchor = { x: front.x, y: front.y };
+  const before = arr.slice(0, i);
+  const after = arr.slice(i + 1);
+  delete p.stacks[sid];
+  if (i === 0) {
+    if (after.length >= 2) {
+      p.stacks[sid] = after;
+      layoutStack(game, p, sid, anchor);
+    } else if (after.length === 1) Object.assign(game.cards[after[0]], anchor);
+  } else {
+    if (before.length >= 2) {
+      p.stacks[sid] = before;
+      layoutStack(game, p, sid, anchor);
+    }
+    if (after.length >= 2) {
+      const nid = rid(3);
+      p.stacks[nid] = after;
+      layoutStack(game, p, nid);
+    }
+  }
+}
+/** Put cards into the stack that `target` is in (or start one), at position `index` (0 = front). */
+function stackInsert(game, ids, target, index) {
+  const p = getPlayer(game, target.zp);
+  let st = stackOf(game, target);
+  if (!st) {
+    const sid = rid(3);
+    p.stacks[sid] = [target.id];
+    st = { p, sid, arr: p.stacks[sid] };
+  }
+  const tf = game.cards[st.arr[0]];
+  const anchor = { x: tf.x, y: tf.y };
+  const arr = st.arr.filter((id) => !ids.includes(id));
+  const i = Math.max(0, Math.min(arr.length, index));
+  arr.splice(i, 0, ...ids);
+  p.stacks[st.sid] = arr;
+  layoutStack(game, p, st.sid, anchor);
+}
+/** Auto-stacking: a land/artifact joins the back of a stack of the same name. */
+function autoStack(game, card) {
+  const p = getPlayer(game, card.zp);
+  if (!p || !p.autoStack || !stackable(card) || card.faceDown || card.attachedTo) return;
+  const mate = p.zones.battlefield.map((id) => game.cards[id]).find((c) => c && c.id !== card.id && c.name === card.name && !c.faceDown && !c.attachedTo);
+  if (!mate) return;
+  const st = stackOf(game, mate);
+  stackInsert(game, [card.id], mate, st ? st.arr.length : 1);
 }
 
 /** When a permanent leaves, anything attached to it falls off (stays on the battlefield). */
@@ -549,7 +740,7 @@ function effectHits(game, e, src, t) {
       return false;
   }
   if (e.who === 'self' || e.who === 'attached') return true;
-  return (!e.filter || hasType(t, e.filter)) && matchesExtra(t, e);
+  return (!e.filter || hasType(t, e.filter)) && (e.kind === 'forEach' || matchesExtra(t, e)) && matchesStatFilters(t, e, '');
 }
 
 function effectSources(game) {
@@ -568,20 +759,37 @@ function applyEtbEffects(game, card) {
   if (card.faceDown) return notes;
   const sources = effectSources(game);
   for (const e of card.effects || []) if (e.on && e.kind === 'etb' && e.who === 'self') sources.push([card, e]);
+  let stats = null;
   for (const [src, e] of sources) {
     if (e.kind !== 'etb') continue;
     if (e.who === 'self' ? src.id !== card.id : !effectHits(game, e, src, card)) continue;
-    addCounter(card, e.counter, e.n);
-    notes.push(`+${e.n} ${e.counter} from ${src.id === card.id ? 'itself' : src.name}`);
+    let n = e.n;
+    if (e.nFrom === 'power') {
+      stats = stats || computeStats(game);
+      const st = stats[src.id];
+      const pw = st && st.total ? parseInt(st.total.split('/')[0], 10) : (plainPT(src) || { p: 0 }).p;
+      n = Number.isFinite(pw) ? Math.max(0, pw) : 0;
+    }
+    const from = src.id === card.id ? 'itself' : src.name;
+    if (n) {
+      addCounter(card, e.counter, n);
+      notes.push(`+${n} ${e.counter} from ${from}`);
+    }
+    if (e.typeAdd) {
+      card.extraTypes = card.extraTypes || [];
+      if (!card.extraTypes.includes(e.typeAdd)) card.extraTypes.push(e.typeAdd);
+      notes.push(`the type ${e.typeAdd} from ${from}`);
+    }
   }
   return notes;
 }
 
-function countFor(game, e, src) {
+function countFor(game, e, src, rel = src) {
   let n = 0;
+  const ok = (c) => hasType(c, e.count) && matchesExtra(c, e) && matchesStatFilters(c, e, 'c') && (!e.shares || (isCreature(c) && sharesCreatureType(c, rel)));
   if (e.where === 'yourGraveyard') {
     const p = getPlayer(game, src.zp);
-    for (const id of p ? p.zones.graveyard : []) if (hasType(game.cards[id], e.count) && matchesExtra(game.cards[id], e)) n++;
+    for (const id of p ? p.zones.graveyard : []) if (ok(game.cards[id])) n++;
     return n;
   }
   for (const p of game.players) {
@@ -590,8 +798,8 @@ function countFor(game, e, src) {
     for (const id of p.zones.battlefield) {
       const c = game.cards[id];
       if (!c || c.faceDown) continue;
-      if (e.other && c.id === src.id) continue;
-      if (hasType(c, e.count) && matchesExtra(c, e)) n++;
+      if (e.other && c.id === rel.id) continue;
+      if (ok(c)) n++;
     }
   }
   return n;
@@ -604,6 +812,25 @@ function countFor(game, e, src) {
 function computeStats(game) {
   const stats = {};
   const sources = effectSources(game);
+  const prevGranted = GRANTED;
+  GRANTED = null;
+  const granted = new Map();
+  for (const [src, e] of sources) {
+    if (e.kind !== 'type') continue;
+    for (const p of game.players)
+      for (const id of p.zones.battlefield) {
+        const c = game.cards[id];
+        if (c && !c.faceDown && effectHits(game, e, src, c)) granted.set(c.id, (granted.get(c.id) || []).concat(e.typeAdd));
+      }
+  }
+  GRANTED = granted;
+  try {
+    return computeStatsInner(game, stats, sources);
+  } finally {
+    GRANTED = prevGranted;
+  }
+}
+function computeStatsInner(game, stats, sources) {
   for (const p of game.players)
     for (const id of p.zones.battlefield) {
       const c = game.cards[id];
@@ -616,13 +843,14 @@ function computeStats(game) {
       const keywords = [];
       for (const [src, e] of sources) {
         if (e.kind === 'pt' && effectHits(game, e, src, c) && (e.p || e.t)) parts.push({ src: src.name, p: e.p, t: e.t });
-        if (e.kind === 'forEach' && src.id === c.id) {
-          const n = countFor(game, e, src);
+        if (e.kind === 'forEach' && (e.who === 'self' || !e.who ? src.id === c.id : effectHits(game, e, src, c))) {
+          const n = countFor(game, e, src, c);
           if (n) parts.push({ src: `${src.name} (${n} ${e.count}${n === 1 ? '' : 's'})`, p: e.p * n, t: e.t * n });
         }
         if (e.kind === 'keyword' && effectHits(game, e, src, c)) keywords.push({ keyword: e.keyword, src: src.name });
       }
-      if (!base && !parts.length && !keywords.length) continue;
+      const gainedTypes = extraTypesOf(c);
+      if (!base && !parts.length && !keywords.length && !gainedTypes.length) continue;
       const sp = parts.reduce((s, x) => s + x.p, 0);
       const st = parts.reduce((s, x) => s + x.t, 0);
       const fx = parts.filter((x) => !x.counter);
@@ -639,6 +867,7 @@ function computeStats(game) {
         keywords,
         // sum of non-counter bonuses (manual + effects), shown as one badge on the card
         fx: fx.length ? { p: fx.reduce((s, x) => s + x.p, 0), t: fx.reduce((s, x) => s + x.t, 0) } : null,
+        types: gainedTypes,
       };
     }
   return stats;
@@ -667,7 +896,7 @@ function moveCard(game, actor, a, { quiet = false } = {}) {
 
   let destP = null;
   if (to === 'battlefield') {
-    destP = a.playerId && getPlayer(game, a.playerId) ? a.playerId : fromZone === 'battlefield' ? fromP : actor.id;
+    destP = a.playerId && getPlayer(game, a.playerId) ? a.playerId : fromZone === 'battlefield' ? fromP : getPlayer(game, card.owner) ? card.owner : actor.id;
   } else if (to !== 'stack') {
     // Cards always go to their OWNER's hand / library / graveyard / exile / command zone.
     destP = card.owner;
@@ -684,6 +913,7 @@ function moveCard(game, actor, a, { quiet = false } = {}) {
   if (fromZone === 'command' && card.isCommander && (to === 'battlefield' || to === 'stack')) card.castCount += 1;
 
   const sameBattlefield = fromZone === 'battlefield' && to === 'battlefield';
+  if (fromZone === 'battlefield' && (to !== 'battlefield' || fromP !== destP)) unstack(game, card);
   if (fromZone === 'hand' && to === 'hand' && fromP === destP) quiet = true; // just re-sorting a hand
   detach(game, card);
   if (fromZone === 'battlefield' && to !== 'battlefield') dropAttachments(game, card);
@@ -706,6 +936,7 @@ function moveCard(game, actor, a, { quiet = false } = {}) {
   if (to === 'battlefield' && fromZone !== 'battlefield' && !card.faceDown && /\bPlaneswalker\b/.test(currentType(card)) && card.loyalty && /^\d+$/.test(card.loyalty) && !card.counters.loyalty)
     card.counters.loyalty = Number(card.loyalty);
   const etb = to === 'battlefield' && fromZone !== 'battlefield' ? applyEtbEffects(game, card) : [];
+  if (to === 'battlefield' && fromZone !== 'battlefield') autoStack(game, card);
 
   if (!quiet) {
     const nm = logName(card, fromZone, to);
@@ -793,15 +1024,19 @@ function resolveTurnOrder(game) {
   game.order = sorted.concat(game.players.map((p) => p.id).filter((id) => !sorted.includes(id)));
   game.turn = { active: sorted[0], number: 1, phase: 1 };
   st.stage = 'done';
-  // Rule 103.8: only in a two-player game does the starting player skip their first draw.
-  const first = getPlayer(game, sorted[0]);
-  if (game.settings.autoDraw && game.players.length >= 3 && first && drawCards(game, first, 1)) {
-    addLog(game, `${first.name} drew for the turn (in games of 3+ players the first player still draws).`);
-    game.turn.phase = 3;
-  }
+  game.turn.round = 1;
+  game.turn.seat = 1;
+  game.turn.startedAt = Date.now();
   addLog(game, `Turn order: ${game.order.map((id) => getPlayer(game, id).name).join(' → ')}. ${getPlayer(game, sorted[0]).name} goes first!`, {
     kind: 'turn',
   });
+  addLog(game, `— Turn 1.1: ${getPlayer(game, sorted[0]).name}'s turn —`, { kind: 'turn', head: true });
+  // (table rule: the first player draws on their first turn too, whatever the player count)
+  const first = getPlayer(game, sorted[0]);
+  if (game.settings.autoDraw && first && drawCards(game, first, 1)) {
+    addLog(game, `${first.name} drew for the turn.`);
+    game.turn.phase = 3;
+  }
 }
 
 /* ------------------------------------------------------------ keywords */
@@ -810,12 +1045,7 @@ const KEYWORD_LIST = ['flying', 'first strike', 'double strike', 'deathtouch', '
 
 /** Keywords printed on the card (lines like "Flying, vigilance") plus ones granted by effects. */
 function cardKeywords(game, card, stats) {
-  const out = new Set();
-  const text = card.flipped && card.backOracle ? card.backOracle : card.oracle || '';
-  for (const line of text.split('\n')) {
-    const parts = line.replace(/\([^)]*\)/g, '').split(',').map((x) => x.trim().toLowerCase().replace(/\.$/, ''));
-    if (parts.length && parts.every((p) => KEYWORD_LIST.includes(p) || /^(ward|protection from|equip|enchant)\b/.test(p))) for (const p of parts) out.add(p);
-  }
+  const out = printedKeywords(card);
   const st = (stats || computeStats(game))[card.id];
   if (st) for (const k of st.keywords) out.add(String(k.keyword).toLowerCase());
   return out;
@@ -930,6 +1160,11 @@ function needsPermission(game, actor, a) {
     case 'setPtMod':
     case 'setEffects':
     case 'unattach':
+    case 'editCard':
+    case 'setCastCount':
+    case 'stackInsert':
+    case 'stackReorder':
+    case 'stackBreak':
       return cardVictim(a.cardId);
     case 'attach':
       return cardVictim(a.cardId) || cardVictim(a.targetId);
@@ -1023,7 +1258,15 @@ function createRequest(game, actor, victimId, action) {
   return { pendingRequest: req.id, waitingFor: victim.name };
 }
 
+const LOGGED_WHEN_OUT = new Set(['setOut', 'chat', 'react', 'respond', 'startGame', 'removePlayer', 'loadDeck']);
+/** Players who are out can play with their own cards; none of it shows in the log. */
 function applyAction(game, actor, a, opts = {}) {
+  const firstId = game.nextLogId;
+  const res = applyActionInner(game, actor, a, opts);
+  if (actor && actor.out && a && !LOGGED_WHEN_OUT.has(a.type)) game.log = game.log.filter((e) => e.id < firstId);
+  return res;
+}
+function applyActionInner(game, actor, a, opts = {}) {
   if (!a || typeof a !== 'object') fail('Bad action.');
   if (!opts.approved) {
     const victim = needsPermission(game, actor, a);
@@ -1040,6 +1283,11 @@ function applyAction(game, actor, a, opts = {}) {
     case 'position': {
       const c = needCard(game, a.cardId);
       if (c.zone !== 'battlefield') fail('Card is not on the battlefield.');
+      const st = stackOf(game, c);
+      if (st) {
+        if (st.arr[0] === c.id) layoutStack(game, st.p, st.sid, { x: num(a.x, 0, TABLE_W - CARD_W, c.x), y: num(a.y, 0, TABLE_H - CARD_H, c.y) });
+        return { silentVersion: true };
+      }
       c.x = num(a.x, 0, TABLE_W - CARD_W, c.x);
       c.y = num(a.y, 0, TABLE_H - CARD_H, c.y);
       // bring to front
@@ -1256,22 +1504,24 @@ function applyAction(game, actor, a, opts = {}) {
     }
 
     case 'proliferate': {
+      const times = int(a.n, 1, 20, 1);
       const names = [];
       for (const id of (Array.isArray(a.cardIds) ? a.cardIds : []).slice(0, 200)) {
         const c = game.cards[id];
         if (!c || c.zone !== 'battlefield') continue;
         const kinds = Object.keys(c.counters);
         if (!kinds.length) continue;
-        for (const k of kinds) addCounter(c, k, 1);
+        for (const k of kinds) addCounter(c, k, times);
         names.push(c.faceDown ? 'a face-down card' : c.name);
       }
       for (const pid of (Array.isArray(a.playerIds) ? a.playerIds : []).slice(0, 8)) {
         const p = getPlayer(game, pid);
         if (!p || !Object.keys(p.counters).length) continue;
-        for (const k of Object.keys(p.counters)) p.counters[k] += 1;
+        for (const k of Object.keys(p.counters)) p.counters[k] += times;
         names.push(p.name);
       }
-      addLog(game, names.length ? `${actor.name} proliferated: ${names.join(', ')}.` : `${actor.name} proliferated (nothing had counters).`);
+      const tx = times > 1 ? ` ${times} times` : '';
+      addLog(game, names.length ? `${actor.name} proliferated${tx}: ${names.join(', ')}.` : `${actor.name} proliferated${tx} (nothing had counters).`);
       break;
     }
 
@@ -1328,10 +1578,12 @@ function applyAction(game, actor, a, opts = {}) {
       const crit = {
         type: str(String(a.typeWord || '').trim(), 30),
         color: COLOR_FILTERS.includes(a.color) ? a.color : '',
-        mvOp: ['<=', '=', '>='].includes(a.mvOp) ? a.mvOp : '',
+        mvOp: ['<', '<=', '=', '>='].includes(a.mvOp) ? a.mvOp : '',
         mv: int(a.mv, 0, 20, 0),
+        nonland: !!a.nonland,
+        exclude: str(String(a.exclude || '').trim(), 40),
       };
-      if (!crit.type && !crit.color && !crit.mvOp) fail('Choose at least one thing to stop at.');
+      if (!crit.type && !crit.color && !crit.mvOp && !crit.nonland) fail('Choose at least one thing to stop at.');
       const ids = [];
       let found = null;
       while (actor.zones.library.length) {
@@ -1341,12 +1593,13 @@ function applyAction(game, actor, a, opts = {}) {
         c.zone = 'reveal';
         c.zp = actor.id;
         const e = { color: crit.color, mvOp: crit.mvOp, mv: crit.mv };
-        if ((!crit.type || hasType(c, crit.type) || c.name.toLowerCase().includes(crit.type.toLowerCase())) && matchesExtra(c, e)) {
+        const excluded = (crit.nonland && /\bLand\b/.test(currentType(c))) || (crit.exclude && (hasType(c, crit.exclude) || c.name.toLowerCase().includes(crit.exclude.toLowerCase())));
+        if (!excluded && (!crit.type || hasType(c, crit.type) || c.name.toLowerCase().includes(crit.type.toLowerCase())) && matchesExtra(c, e)) {
           found = c.id;
           break;
         }
       }
-      const parts = [crit.type && `"${crit.type}"`, crit.color && COLOR_WORD[crit.color], crit.mvOp && `mana value ${crit.mvOp} ${crit.mv}`].filter(Boolean);
+      const parts = [crit.nonland && 'a nonland card', crit.type && `"${crit.type}"`, crit.color && COLOR_WORD[crit.color], crit.mvOp && `mana value ${crit.mvOp} ${crit.mv}`, crit.exclude && `not "${crit.exclude}"`].filter(Boolean);
       game.reveal = { pid: actor.id, ids, found, crit: parts.join(', ') };
       const f = found && game.cards[found];
       addLog(game, `${actor.name} revealed cards until ${parts.join(', ')}: ${ids.length} card${ids.length === 1 ? '' : 's'} revealed${f ? `, found ${f.name}` : ', nothing matched'}.`);
@@ -1532,8 +1785,9 @@ function applyAction(game, actor, a, opts = {}) {
       const p = needPlayer(game, a.playerId || actor.id);
       const d = int(a.delta, -1000, 1000, 0);
       if (!d) break;
+      const before = p.life;
       p.life += d;
-      addLog(game, `${p.id === actor.id ? '' : `${actor.name}: `}${p.name} ${d > 0 ? 'gained' : 'lost'} ${Math.abs(d)} life (now ${p.life}).`, { kind: 'life' });
+      addLog(game, `${p.id === actor.id ? '' : `${actor.name}: `}${p.name} ${d > 0 ? 'gained' : 'lost'} ${Math.abs(d)} life (${before} → ${p.life}).`, { kind: 'life' });
       break;
     }
 
@@ -1622,6 +1876,8 @@ function applyAction(game, actor, a, opts = {}) {
         const c = instantiate(game, tpl, p.id, { isToken: true });
         autoPlace(game, p.id, c, a.hint);
         placeIn(game, c, 'battlefield', p.id);
+        applyEtbEffects(game, c);
+        autoStack(game, c);
       }
       addLog(game, `${actor.name} created ${count} ${tpl.name}${tpl.pt ? ` (${tpl.pt})` : ''} token${count === 1 ? '' : 's'}${p.id !== actor.id ? ` for ${p.name}` : ''}.`);
       break;
@@ -1630,12 +1886,16 @@ function applyAction(game, actor, a, opts = {}) {
     case 'clone': {
       const src = needCard(game, a.cardId);
       const pid = src.zone === 'battlefield' ? src.zp : actor.id;
-      const c = instantiate(game, src, actor.id, { isToken: true });
-      c.isCommander = false;
-      if (src.zone === 'battlefield') autoPlace(game, pid, c, { x: src.x + 160, y: src.y + 70 });
-      else autoPlace(game, pid, c, a.hint);
-      placeIn(game, c, 'battlefield', pid);
-      addLog(game, `${actor.name} created a token copy of ${src.name}.`);
+      const count = int(a.count, 1, 30, 1);
+      for (let i = 0; i < count; i++) {
+        const c = instantiate(game, src, actor.id, { isToken: true });
+        c.isCommander = false;
+        if (src.zone === 'battlefield') autoPlace(game, pid, c, { x: src.x + 160, y: src.y + 70 });
+        else autoPlace(game, pid, c, a.hint);
+        placeIn(game, c, 'battlefield', pid);
+        applyEtbEffects(game, c);
+      }
+      addLog(game, `${actor.name} created ${count === 1 ? 'a token copy' : `${count} token copies`} of ${src.name}.`);
       break;
     }
 
@@ -1671,14 +1931,26 @@ function applyAction(game, actor, a, opts = {}) {
     case 'passTurn': {
       if (!game.players.length) break;
       const order = turnOrder(game);
-      let idx = order.indexOf(game.turn.active);
-      idx = (idx + 1) % order.length;
+      const prev = getPlayer(game, game.turn.active);
+      const prevIdx = order.indexOf(game.turn.active);
+      let idx = prevIdx;
+      let wrapped = false;
+      for (let k = 0; k < order.length; k++) {
+        idx = (idx + 1) % order.length;
+        if (idx === 0) wrapped = true;
+        const cand = getPlayer(game, order[idx]);
+        if (cand && !cand.out) break;
+      }
       const next = getPlayer(game, order[idx]);
+      if (prev && game.turn.startedAt) addLog(game, `${prev.name}'s turn took ${fmtDuration(Date.now() - game.turn.startedAt)}.`, { kind: 'time' });
       game.turn.active = next.id;
       game.combat = null;
       game.turn.number += 1;
+      game.turn.round = (game.turn.round || 1) + (wrapped ? 1 : 0);
+      game.turn.seat = idx + 1;
+      game.turn.startedAt = Date.now();
       game.turn.phase = 0;
-      addLog(game, `— Turn ${game.turn.number}: ${next.name}'s turn —`, { kind: 'turn' });
+      addLog(game, `— Turn ${game.turn.round}.${game.turn.seat}: ${next.name}'s turn —`, { kind: 'turn', head: true });
       if (game.settings.autoUntap) {
         for (const id of next.zones.battlefield) game.cards[id].tapped = false;
         game.turn.phase = 1;
@@ -1739,6 +2011,8 @@ function applyAction(game, actor, a, opts = {}) {
     case 'startGame': {
       const withDecks = game.players.filter((p) => p.deck);
       if (!withDecks.length) fail('Load a deck first.');
+      const missing = game.players.filter((p) => !p.deck);
+      if (missing.length) fail(`Waiting for ${missing.map((p) => p.name).join(' and ')} to choose a deck.`);
       game.stack = [];
       for (const p of game.players) {
         resetPlayerState(game, p);
@@ -1752,7 +2026,9 @@ function applyAction(game, actor, a, opts = {}) {
       game.combat = null;
       game.reveal = null;
       game.order = [];
-      game.turn = { active: null, number: 1, phase: 0 };
+      game.turn = { active: null, number: 1, phase: 0, round: 1, seat: 1 };
+      game.winner = null;
+      for (const p of game.players) p.out = false;
       game.setup = { stage: 'mulligan', rollers: withDecks.map((p) => p.id), kept: {}, mulls: {}, results: {}, eligible: [], anims: {}, round: 1 };
       addLog(game, `${actor.name} started a new game. Everyone shuffled and drew 7. Mulligan or keep!`, { kind: 'turn' });
       break;
@@ -1785,6 +2061,123 @@ function applyAction(game, actor, a, opts = {}) {
       }
       if (game.turn.active === p.id) game.turn.active = game.players[0] ? game.players[0].id : null;
       addLog(game, `${actor.name} removed ${p.name} from the game.`);
+      break;
+    }
+
+    case 'stackInsert': {
+      const c = needCard(game, a.cardId);
+      const target = needCard(game, a.targetId);
+      if (c.zone !== 'battlefield' || target.zone !== 'battlefield') fail('Both cards need to be on the battlefield.');
+      if (c.zp !== target.zp) fail('Stacks are made on one battlefield.');
+      if (!stackable(c) || !stackable(target)) fail('Only lands and artifacts stack.');
+      if (c.id === target.id) break;
+      const own = stackOf(game, c);
+      const tst = stackOf(game, target);
+      if (own && tst && own.sid === tst.sid) {
+        // re-ordering inside the same stack
+        const arr = own.arr.filter((id) => id !== c.id);
+        const anchor = { x: game.cards[own.arr[0]].x, y: game.cards[own.arr[0]].y };
+        arr.splice(Math.max(0, Math.min(arr.length, int(a.index, 0, 99, 0))), 0, c.id);
+        own.p.stacks[own.sid] = arr;
+        layoutStack(game, own.p, own.sid, anchor);
+        return { quiet: true };
+      }
+      let ids = [c.id];
+      if (own && own.arr[0] === c.id && !a.single) {
+        ids = own.arr.slice(); // dragging a whole stack
+        delete own.p.stacks[own.sid];
+      } else if (own) unstack(game, c);
+      for (const x of Object.values(game.cards)) if (ids.includes(x.attachedTo)) x.attachedTo = null;
+      for (const id of ids) game.cards[id].attachedTo = null;
+      stackInsert(game, ids, target, int(a.index, 0, 99, 0));
+      return { quiet: true };
+    }
+
+    case 'stackBreak': {
+      const c = needCard(game, a.cardId);
+      if (c.zone !== 'battlefield') fail('Card is not on the battlefield.');
+      unstack(game, c);
+      if (Number.isFinite(Number(a.x)) && Number.isFinite(Number(a.y))) {
+        c.x = num(a.x, 0, TABLE_W - CARD_W, c.x);
+        c.y = num(a.y, 0, TABLE_H - CARD_H, c.y);
+      }
+      const bf = getPlayer(game, c.zp).zones.battlefield;
+      bf.splice(bf.indexOf(c.id), 1);
+      bf.push(c.id);
+      return { quiet: true };
+    }
+
+    case 'setCastCount': {
+      const c = needCard(game, a.cardId);
+      if (!c.isCommander) fail('Only commanders have commander tax.');
+      const n = int(a.count, 0, 99, c.castCount);
+      if (n === c.castCount) return { noChange: true };
+      c.castCount = n;
+      addLog(game, `${actor.name} set ${c.name}'s commander tax to {${n * 2}} (cast ${n} time${n === 1 ? '' : 's'} before).`);
+      break;
+    }
+
+    case 'setAutoStack':
+      actor.autoStack = !!a.value;
+      return { quiet: true };
+
+    case 'setPlayerColor': {
+      const col = String(a.color || '');
+      if (!/^#[0-9a-f]{6}$/i.test(col)) fail('Pick a colour.');
+      actor.color = col.toLowerCase();
+      return { quiet: true };
+    }
+
+    case 'editCard': {
+      const c = needCard(game, a.cardId);
+      const back = c.flipped && !!c.backName;
+      const f = back ? { name: 'backName', typeLine: 'backTypeLine', pt: 'backPt', oracle: 'backOracle' } : { name: 'name', typeLine: 'typeLine', pt: 'pt', oracle: 'oracle' };
+      const changes = [];
+      const set = (key, val, label) => {
+        if (val === undefined) return;
+        const v = typeof val === 'string' ? val : '';
+        if ((c[key] || '') === v) return;
+        changes.push(`${label} ${c[key] || '—'} → ${v || '—'}`);
+        c[key] = v || (key === 'pt' || key === 'backPt' || key === 'loyalty' ? null : '');
+      };
+      const oldName = c[f.name];
+      if (a.name !== undefined) {
+        const nm = str(String(a.name).trim(), 150);
+        if (!nm) fail('A card needs a name.');
+        set(f.name, nm, 'name');
+      }
+      if (a.typeLine !== undefined) set(f.typeLine, str(String(a.typeLine).trim(), 150), 'type');
+      if (a.pt !== undefined) {
+        const pt = str(String(a.pt).replace(/\s+/g, ''), 12);
+        if (pt && !/^[-+*\dX]+\/[-+*\dX]+$/i.test(pt)) fail('Power/toughness looks like 2/3.');
+        set(f.pt, pt, 'P/T');
+      }
+      if (a.loyalty !== undefined) set('loyalty', str(String(a.loyalty).trim(), 6), 'loyalty');
+      if (a.oracle !== undefined) {
+        const o = str(String(a.oracle), 1500);
+        if ((c[f.oracle] || '') !== o) {
+          c[f.oracle] = o;
+          changes.push('rules text');
+        }
+      }
+      if (!changes.length) return { noChange: true };
+      c.edited = true;
+      addLog(game, `${actor.name} edited ${c.faceDown ? 'a face-down card' : oldName}: ${changes.join(', ')}.`);
+      break;
+    }
+
+    case 'setOut': {
+      const out = a.value !== false;
+      if (!!actor.out === out) break;
+      actor.out = out;
+      addLog(game, out ? `${actor.name} is out of the game.` : `${actor.name} is back in the game.`, { kind: 'warn' });
+      const inGame = game.players.filter((p) => p.deck);
+      const alive = inGame.filter((p) => !p.out);
+      if (inGame.length >= 2 && alive.length === 1) {
+        game.winner = { id: alive[0].id, seq: game.nextSeq++, losers: inGame.filter((p) => p.out).map((p) => p.id) };
+        addLog(game, `${alive[0].name} wins the game!`, { kind: 'turn', head: true });
+      } else if (game.winner && alive.length !== 1) game.winner = null;
+      if (out && game.combat && combatParticipants(game).includes(actor.id) && game.combat.attacker === actor.id) game.combat = null;
       break;
     }
 
@@ -1840,6 +2233,8 @@ function cardView(c, viewerId, forceVisible = false, stats = null) {
     isCommander: c.isCommander,
     castCount: c.castCount,
     tokens: c.tokens,
+    edited: !!c.edited,
+    extraTypes: c.extraTypes || [],
   };
 }
 
@@ -1875,6 +2270,9 @@ function viewFor(game, viewerId, connectedIds = new Set()) {
       handRevealed: p.handRevealed,
       deckName: p.deckName,
       bfColor: p.bfColor || null,
+      out: !!p.out,
+      autoStack: !!p.autoStack,
+      stacks: Object.values(p.stacks || {}).map((arr) => arr.slice()),
       shuffleSeq: p.shuffleSeq || 0,
       handCount: p.zones.hand.length,
       libraryCount: p.zones.library.length,
@@ -1913,6 +2311,8 @@ function viewFor(game, viewerId, connectedIds = new Set()) {
     turn: game.turn,
     order: turnOrder(game),
     setup: game.setup,
+    winner: game.winner || null,
+    now: Date.now(),
     combat,
     reveal: game.reveal,
     dice: game.dice,
@@ -1958,6 +2358,14 @@ function upgradeGame(g) {
   if (!g.cards) g.cards = {};
   if (g.combat === undefined) g.combat = null;
   if (g.reveal === undefined) g.reveal = null;
+  if (g.winner === undefined) g.winner = null;
+  if (!g.turn.round) {
+    const order = (g.order || []).length ? g.order : (g.players || []).map((p) => p.id);
+    const n = Math.max(1, order.length);
+    g.turn.round = Math.floor(((g.turn.number || 1) - 1) / n) + 1;
+    g.turn.seat = Math.max(1, order.indexOf(g.turn.active) + 1);
+  }
+  if (!g.turn.startedAt) g.turn.startedAt = Date.now();
   if (!g.planeV || g.planeV < PLANE_V) {
     // older versions used a small 1600x700 table; centre those cards on the big plane
     for (const c of Object.values(g.cards)) if (c.zone === 'battlefield') {
@@ -1973,6 +2381,9 @@ function upgradeGame(g) {
   }
   for (const p of g.players || []) {
     if (p.bfColor === undefined) p.bfColor = null;
+    if (!p.stacks || typeof p.stacks !== 'object') p.stacks = {};
+    p.out = !!p.out;
+    p.autoStack = !!p.autoStack;
     if (!p.counters) p.counters = {};
     if (!p.cmdDamage) p.cmdDamage = {};
     if (!p.zones) p.zones = {};
@@ -1986,6 +2397,7 @@ function upgradeGame(g) {
     if (c.attachedTo === undefined) c.attachedTo = null;
     for (const k of ['oracle', 'backOracle', 'manaCost', 'backTypeLine', 'typeLine', 'note']) if (typeof c[k] !== 'string') c[k] = '';
     if (!Array.isArray(c.tokens)) c.tokens = [];
+    if (!Array.isArray(c.extraTypes)) c.extraTypes = [];
   }
   return g;
 }
@@ -2014,6 +2426,8 @@ const api = {
   createRequest,
   UNDO_BARRIERS,
   REACTIONS,
+  STACK_STEP,
+  sharesCreatureType,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.MTGEngine = api;

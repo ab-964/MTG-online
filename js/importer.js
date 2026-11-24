@@ -394,6 +394,10 @@
               thing = thing.replace(/ cards?$/, '');
               add({ kind: 'forEach', p: pm(m[1]), t: pm(m[2]), count: thing, where, other: !!m[3] });
             }
+          } else if ((m = /^Each (other )?creature( you control)? gets ([+-]\d+)\/([+-]\d+) for each other creature (on the battlefield|you control) that shares (?:at least one|a) creature type with it$/i.exec(s2))) {
+            add({ kind: 'forEach', who: m[2] ? (m[1] ? 'yoursOther' : 'yours') : 'all', p: pm(m[3]), t: pm(m[4]), count: 'creature', where: m[5] === 'you control' ? 'you' : 'all', other: true, shares: true });
+          } else if ((m = /^Each (other )?(creature|[A-Z][\w'-]*) you control enters(?: the battlefield)? with (?:a number of )?additional ([+-]1\/[+-]1) counters on it equal to ~'s power(?:,? and as an? ([A-Z][\w'-]*) in addition to its other types)?$/i.exec(s2))) {
+            add({ kind: 'etb', who: m[1] ? 'yoursOther' : 'yours', filter: /^creature$/i.test(m[2]) ? '' : singular(m[2]), nFrom: 'power', n: 0, counter: m[3], typeAdd: m[4] || '' });
           } else if ((m = /^~ gets ([+-]\d+)\/([+-]\d+)(?: and has (.+))?$/.exec(s2))) {
             add({ kind: 'pt', who: 'self', p: pm(m[1]), t: pm(m[2]) });
             for (const k of parseKeywords(m[3])) add({ kind: 'keyword', who: 'self', keyword: k });

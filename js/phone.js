@@ -43,12 +43,13 @@
         <div class="pturn" id="p-turn"></div>
         <div class="pphases" id="p-phases"></div>
         <button class="pbtn ptext" id="p-cur" hidden></button>
+        <span class="ptimer" id="p-timer"></span>
         <button class="pbtn primary" id="p-pass">Pass ▶</button>
       </div>
       <div class="pmain" id="p-main">
         <div class="pview" data-view="bf">
           <div class="pwatch mine">
-            <div class="plog log" id="p-me-log"></div>
+            <div class="plogcol"><div class="plog log" id="p-me-log"></div><form class="pchat chat-form"><input maxlength="300" placeholder="Chat…" autocomplete="off" enterkeyhint="send"></form></div>
             <div class="pslot" id="p-slot-me"></div>
             <div class="ppiles" id="p-piles"></div>
           </div>
@@ -57,7 +58,7 @@
         <div class="pview" data-view="grid" hidden><div class="pgrid" id="p-grid"></div></div>
         <div class="pview" data-view="watch" hidden>
           <div class="pwatch">
-            <div class="plog log" id="p-watch-log"></div>
+            <div class="plogcol"><div class="plog log" id="p-watch-log"></div><form class="pchat chat-form"><input maxlength="300" placeholder="Chat…" autocomplete="off" enterkeyhint="send"></form></div>
             <div class="pslot" id="p-slot-watch"></div>
             <div class="pside" id="p-watch-side"></div>
           </div>
@@ -110,6 +111,13 @@
       const ph = e.target.closest('[data-i]');
       if (ph) U.act({ type: 'setPhase', phase: Number(ph.dataset.i) });
     });
+    for (const f of $$('#phone .pchat'))
+      f.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const i = f.querySelector('input');
+        if (i.value.trim()) U.act({ type: 'chat', text: i.value });
+        i.value = '';
+      });
     $('#p-chat').addEventListener('submit', (e) => {
       e.preventDefault();
       const i = e.target.querySelector('input');
@@ -148,7 +156,7 @@
     // life badges
     $('#phone').addEventListener('click', (e) => {
       const lb = e.target.closest('.plife');
-      if (lb && !U.mode) lifeSheet(lb.dataset.pid);
+      if (lb && !U.mode) U.lifeDialog(lb.dataset.pid);
     });
     window.addEventListener('resize', checkOrientation);
     window.addEventListener('orientationchange', () => setTimeout(checkOrientation, 200));
@@ -185,7 +193,7 @@
     if (view === 'combat' && !S.combat) view = 'bf';
     const me = U.me();
     const active = U.playerById(S.turn.active);
-    $('#p-turn').textContent = !active ? 'Setting up' : active.id === S.you ? 'Your turn' : '';
+    $('#p-turn').textContent = !active ? 'Setting up' : `${active.id === S.you ? 'Your turn ' : ''}${U.turnLabel()}`;
     $('#p-turn').classList.toggle('mine', !!active && active.id === S.you);
     $('#p-logbtn').classList.toggle('on', logOn);
     const cur = $('#p-cur');
@@ -272,6 +280,7 @@
     }
     bf.style.setProperty('--felt', p.bfColor || '');
     bf.querySelector('.plife').innerHTML = lifeBadge(p);
+    bf.querySelector('.plife').classList.toggle('out', !!p.out);
     const sel = U.mode && U.mode.kind === 'proliferate' && U.mode.players.has(p.id);
     bf.querySelector('.plife').classList.toggle('selected', !!sel);
     const { ids, pos } = U.paneLayout(p);
@@ -435,6 +444,11 @@
   }
 
   function moveCardDrag(g, e) {
+    if (g.wiggle === undefined) g.wiggle = U.stackInfo(g.card) ? U.makeWiggle() : null;
+    if (g.wiggle && !g.broken && g.wiggle(e.clientX)) {
+      g.broken = true;
+      U.toast('Broke it off the stack');
+    }
     g.ghostEl.style.left = `${e.clientX - g.gw / 2}px`;
     g.ghostEl.style.top = `${e.clientY - g.gh / 2}px`;
     g.lx = e.clientX;
@@ -458,14 +472,15 @@
     const bfEl = under && under.closest('.pbf');
     if (!bfEl) return;
     const target = under.closest('.card[data-id]');
-    if (target && target.dataset.id !== c.id && U.isEquipLike(c)) {
-      return U.act({ type: 'attach', cardId: c.id, targetId: target.dataset.id });
-    }
     const tpid = bfEl.dataset.pid;
     const table = bfEl.querySelector('.bf-table').getBoundingClientRect();
     const z = U.views[tpid].z;
     const x = clamp((e.clientX - table.left) / z - 50, 0, U.S.table.w - 100);
     const y = clamp((e.clientY - table.top) / z - 70, 0, U.S.table.h - 140);
+    if (await U.stackDrop(c, tpid, x, y, e.clientY, under, g.broken)) return;
+    if (target && target.dataset.id !== c.id && U.isEquipLike(c)) {
+      return U.act({ type: 'attach', cardId: c.id, targetId: target.dataset.id });
+    }
     if (c.zone === 'battlefield' && c.zp === tpid) {
       if (c.attachedTo) await U.act({ type: 'unattach', cardId: c.id });
       g.cardEl.style.left = `${x}px`;
@@ -610,7 +625,8 @@
     const t = U.combatTargetsHTML(def);
     $('#p-combat-head').innerHTML = `${U.ICONS.sword}<span>${esc(iAttack ? 'You' : attP ? attP.name : '?')} attacking <b>${esc(def === S.you ? 'you' : defP ? defP.name : '?')}</b></span>
       ${iAttack ? '<span class="muted small">tap a target to add attackers</span>' : ''}`;
-    $('#p-combat').innerHTML = t.html;
+    $('#p-combat').style.setProperty('--cbw', U.combatCardW(66));
+    $('#p-combat').innerHTML = `<div class="cbo-inner">${t.html}</div>`;
     $('#p-combat-bar').innerHTML = U.combatBarHTML(t.playerTotal);
   }
 
@@ -739,62 +755,6 @@
     U.showMenu(U.cardMenu(c, ctx), 0, 0, { head: cardHead(c) });
   }
 
-  /** Life: slide right for damage, left for gain, ±1 to fine-tune. Applied when you close the window. */
-  function lifeSheet(pid) {
-    if (!U.S) return;
-    const p = U.playerById(pid);
-    if (!p) return;
-    let delta = 0;
-    const counters = Object.entries(p.counters || {});
-    const cmds = U.S.format === 'commander' ? Object.values(U.S.cards).filter((c) => c.isCommander && c.owner !== pid && !c.isToken) : [];
-    U.dialog({
-      title: `${p.id === U.S.you ? 'Your' : `${p.name}'s`} life`,
-      body: `<div class="lf-now"><span class="lf-old">${p.life}</span><span class="lf-arrow">→</span><b class="lf-new">${p.life}</b><span class="lf-desc muted"></span></div>
-        <div class="lf-slide"><span class="muted small">gain</span><input type="range" min="-20" max="20" step="1" value="0" class="lf-range"><span class="muted small">damage</span></div>
-        <div class="row gap lf-btns"><button class="btn" data-lf="-1">−1</button><button class="btn" data-lf="1">+1</button></div>
-        ${counters.length || cmds.length ? '<div class="sect-title">Counters &amp; commander damage</div>' : ''}
-        ${counters.map(([k, v]) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span><button class="btn tiny" data-pc="${esc(k)}" data-d="-1">−</button><button class="btn tiny" data-pc="${esc(k)}" data-d="1">+</button></div>`).join('')}
-        ${cmds
-          .map((c) => {
-            const owner = U.playerById(c.owner);
-            const v = (p.cmdDamage || {})[c.id] || 0;
-            return `<div class="kv"><span class="k">${esc(owner ? owner.name : '?')} · ${esc(c.name)}</span><span class="v">${v}</span><button class="btn tiny" data-cmd="${c.id}" data-d="-1">−</button><button class="btn tiny" data-cmd="${c.id}" data-d="1">+</button></div>`;
-          })
-          .join('')}
-        <button class="btn small" data-pcadd="1">+ Player counter (poison, energy…)</button>`,
-      buttons: [{ label: 'Done', value: 'ok', primary: true }],
-      onMount(root) {
-        const range = root.querySelector('.lf-range');
-        const draw = () => {
-          root.querySelector('.lf-new').textContent = String(p.life + delta);
-          root.querySelector('.lf-desc').textContent = delta < 0 ? `${-delta} damage` : delta > 0 ? `gain ${delta}` : '';
-          range.value = String(clamp(-delta, -20, 20));
-        };
-        range.addEventListener('input', () => {
-          delta = -Number(range.value);
-          draw();
-        });
-        root.addEventListener('click', async (e) => {
-          const b = e.target.closest('button');
-          if (!b) return;
-          if (b.dataset.lf) {
-            delta += Number(b.dataset.lf);
-            draw();
-          }
-          if (b.dataset.pc) U.act({ type: 'playerCounter', playerId: pid, name: b.dataset.pc, delta: Number(b.dataset.d) });
-          if (b.dataset.cmd) U.act({ type: 'cmdDamage', playerId: pid, sourceId: b.dataset.cmd, delta: Number(b.dataset.d) });
-          if (b.dataset.pcadd) {
-            const n = await U.askText('Add a player counter', 'poison');
-            if (n) U.act({ type: 'playerCounter', playerId: pid, name: n, delta: 1 });
-          }
-        });
-      },
-    }).then(() => {
-      // closing the window (Done, or tapping outside) applies the change; Undo fixes mistakes
-      if (delta) U.act({ type: 'life', playerId: pid, delta });
-    });
-  }
-
   function openMainMenu() {
     const S = U.S;
     if (!S) return U.toast('Still loading the game… one moment.');
@@ -818,6 +778,16 @@
         { label: 'Proliferate…', icon: I.prolif, fn: () => { setView('bf'); U.startProliferate(); } },
         { label: 'Undo', icon: I.undo, fn: () => U.act({ type: 'undo' }) },
         { label: 'Untap all my permanents', icon: I.untap, fn: () => U.act({ type: 'untapAll' }) },
+        S.turn.active && U.me()
+          ? {
+              label: U.me().out ? 'Back in the game' : "I'm out",
+              icon: I.leave,
+              fn: async () => {
+                if (U.me().out) return U.act({ type: 'setOut', value: false });
+                if (await U.confirmBox("You're out?", 'You can still chat and play around with your own cards (none of it goes in the log).', "I'm out", true)) U.act({ type: 'setOut', value: true });
+              },
+            }
+          : null,
         { sep: true },
         { label: 'Load deck…', icon: I.deck, fn: () => U.deckDialog() },
         { label: S.setup && S.setup.stage !== 'done' ? 'Restart game…' : 'Start game…', icon: I.play, fn: () => U.startGameClick() },
@@ -876,7 +846,7 @@
         const p = U.playerById(pid);
         return `<div class="pcell slot-${i} ${S.turn.active === pid ? 'active' : ''}" data-pid="${pid}" ${p.bfColor ? `style="--felt:${esc(p.bfColor)}"` : ''}>
           <div class="mini" data-mini="${pid}"></div>
-          <div class="pinfo"><span class="dot" style="background:${esc(p.color)}"></span><b>${esc(pid === S.you ? 'You' : p.name)}</b> ♥ ${p.life}
+          <div class="pinfo ${p.out ? 'out' : ''}"><span class="dot" style="background:${esc(p.color)}"></span><b>${esc(pid === S.you ? 'You' : p.name)}</b> ♥ ${p.life}
             <span class="muted">✋${p.handCount} · GY ${p.zones.graveyard.length}</span></div></div>`;
       })
       .join('');

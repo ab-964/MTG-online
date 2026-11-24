@@ -221,7 +221,7 @@
         }
         const type = r.appliedType || action.type;
         const by = r.appliedBy || player.id;
-        const recordable = !r.noChange && !r.pendingRequest && !r.denied && !['chat', 'react', 'cancelRequest', 'viewZone', 'closeSetup', 'setColor'].includes(type) && !(action.type === 'respond' && !r.appliedType);
+        const recordable = !r.noChange && !r.pendingRequest && !r.denied && !['chat', 'react', 'cancelRequest', 'viewZone', 'closeSetup', 'setColor', 'setPlayerColor', 'setAutoStack'].includes(type) && !(action.type === 'respond' && !r.appliedType);
         if (recordable) {
           this.history.push(E.UNDO_BARRIERS.has(type) ? { barrier: true, actorId: by, type } : { snap, actorId: by, type });
           if (this.history.length > 40) this.history.shift();

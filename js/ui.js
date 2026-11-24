@@ -302,6 +302,7 @@
   }
 
   function onState(view) {
+    if (view && view.now) clockOffset = view.now - Date.now();
     S = view;
     render();
     firstState = false;
@@ -415,6 +416,9 @@
     renderModeBanner();
     if (viewer) renderViewer();
     for (const fn of renderHooks) fn(S);
+    checkWinner();
+    checkDeath();
+    tickTimers();
   }
 
   function renderDesktop() {
@@ -514,6 +518,7 @@
     const area = areaEl(p.id);
     const isMe = p.id === S.you;
     $('.ppanel', area).innerHTML = panelHTML(p, isMe, { compact: area.classList.contains('in-grid'), oppCount });
+    area.classList.toggle('is-out', !!p.out);
     $('.bf-owner', area).textContent = isMe ? 'Your battlefield' : `${p.name}'s battlefield`;
     $('.bf', area).style.setProperty('--felt', p.bfColor || '');
     $('.bf', area).classList.toggle('custom-felt', !!p.bfColor);
@@ -572,7 +577,8 @@
       const next = playerById(seats[(seats.indexOf(p.id) + 1) % seats.length]);
       rows.push(`<button class="btn small switch" data-act="switch-opp">⇄ Switch to ${esc(next ? next.name : '')}</button>`);
     }
-    rows.push(`<div class="life" title="Click ± to change life (Shift = 5). Click the number to set it.">
+    if (p.out) rows.push('<div class="out-tag">Out of the game</div>');
+    rows.push(`<div class="life" title="Click ± to change life (Shift = 5). Click the number for the life slider.">
       <button class="btn" data-act="life" data-pid="${p.id}" data-d="-1">−</button>
       <span class="val" data-act="setlife" data-pid="${p.id}">${p.life}</span>
       <button class="btn" data-act="life" data-pid="${p.id}" data-d="1">+</button></div>`);
@@ -582,6 +588,7 @@
         <button class="btn tiny" data-act="pc" data-pid="${p.id}" data-name="${esc(k)}" data-d="-1">−</button>
         <button class="btn tiny" data-act="pc" data-pid="${p.id}" data-name="${esc(k)}" data-d="1">+</button></div>`);
     if (!compact) rows.push(`<button class="btn small" data-act="pc-add" data-pid="${p.id}">+ player counter</button>`);
+    if (isMe && !compact && S.turn.active) rows.push(`<button class="btn small ${p.out ? '' : 'out-btn'}" data-act="out">${p.out ? 'Back in the game' : "I'm out"}</button>`);
 
     if (S.format === 'commander' && !compact) {
       const sources = new Map();
@@ -622,13 +629,34 @@
     const active = playerById(S.turn.active);
     const mineTurn = S.turn.active === S.you;
     $('#turn-label').innerHTML = active
-      ? `Turn ${S.turn.number} · ${mineTurn ? '<span style="color:var(--accent)">Your turn</span>' : `${esc(active.name)}'s turn`}`
+      ? `Turn ${turnLabel()} · ${mineTurn ? '<span style="color:var(--accent)">Your turn</span>' : `${esc(active.name)}'s turn`}`
       : '<span class="muted">Load decks, then Start game</span>';
+    const waiting = S.players.filter((p) => !p.deckName).map((p) => p.name);
+    const startBtn = $('#btn-start');
+    startBtn.disabled = !(S.setup && S.setup.stage !== 'done') && waiting.length > 0;
+    startBtn.title = startBtn.disabled ? `Waiting for ${waiting.join(' and ')} to choose a deck` : '';
     $('#btn-pass').disabled = !active;
     $('#phases').innerHTML = S.phases.map((ph, i) => `<span class="phase ${i === S.turn.phase ? 'on' : ''}" data-act="phase" data-i="${i}">${esc(ph)}</span>`).join('');
     $('#btn-pass').textContent = !active || mineTurn ? 'Pass turn ▶' : `End ${active.name}'s turn ▶`;
     reconcile($('#stack'), S.stack, (id, el) => cardEl(S.cards[id], el, 'stack'));
   }
+
+  /** "2.1" = round 2, first player in turn order. */
+  const turnLabel = () => (S && S.turn.round ? `${S.turn.round}.${S.turn.seat || 1}` : S ? String(S.turn.number) : '');
+  let clockOffset = 0; // host clock minus ours
+  function turnElapsed() {
+    if (!S || !S.turn.startedAt || !S.turn.active || (S.setup && S.setup.stage !== 'done')) return '';
+    const s = Math.max(0, Math.floor((Date.now() + clockOffset - S.turn.startedAt) / 1000));
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const pad = (n) => String(n).padStart(2, '0');
+    return h ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
+  }
+  function tickTimers() {
+    const t = turnElapsed();
+    for (const el of $$('.turn-timer, #p-timer')) el.textContent = t;
+  }
+  setInterval(tickTimers, 1000);
 
   function renderHandAndPiles(mine) {
     const hand = $('#hand');
@@ -666,8 +694,9 @@
         return `<button class="rx-chip ${ids.includes(S.you) ? 'mine' : ''}" data-rx="${emo}" data-log="${e.id}" title="${esc(names)}">${emo}<b>${ids.length}</b></button>`;
       })
       .join('');
-    return `${chips}<button class="rx-add" data-rxpick="${e.id}" title="React">☺︎+</button>`;
+    return chips;
   }
+  const rxAddHTML = (e) => (e.kind === 'time' ? '' : `<button class="rx-add" data-rxpick="${e.id}" title="React">☺︎</button>`);
 
   function renderLog(log) {
     if (!log) return;
@@ -691,11 +720,12 @@
         continue;
       }
       const d = document.createElement('div');
-      d.className = `e ${e.kind ? `k-${e.kind}` : ''}`;
+      d.className = `e ${e.kind ? `k-${e.kind}` : ''} ${e.head ? 'k-head' : ''}`;
       d.dataset.log = e.id;
       d.dataset.rxsig = sig;
       const time = new Date(e.t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       d.innerHTML =
+        rxAddHTML(e) +
         (e.kind === 'chat'
           ? `<span class="t">${time}</span><b style="color:${esc(e.color)}">${esc(e.who)}:</b> ${esc(e.text)}`
           : `<span class="t">${time}</span>${esc(e.text)}`) + `<div class="rx">${reactionsHTML(e)}</div>`;
@@ -947,6 +977,8 @@
   const diceSeen = {};
   const animating = new Set();
 
+  const DEFAULT_FELT = '#1a2a24';
+  const dieColor = (p) => (p && p.bfColor) || DEFAULT_FELT;
   function dieEl(d, el, pid) {
     if (!el || !el.classList.contains('die')) {
       el = document.createElement('div');
@@ -957,7 +989,7 @@
     el.dataset.die = d.id;
     el.dataset.pid = pid;
     el.classList.toggle('mine', d.owner === S.you);
-    el.style.setProperty('--dc', (playerById(d.owner) || {}).color || '#d6a531');
+    el.style.setProperty('--dc', dieColor(playerById(d.owner)));
     if (d.seq && diceSeen[d.id] !== d.seq) {
       diceSeen[d.id] = d.seq;
       if (!firstState) {
@@ -1142,7 +1174,7 @@
         el.style.top = `${S.tray.h - 110}px`;
         tray.appendChild(el);
       }
-      el.style.setProperty('--dc', p ? p.color : '#888');
+      el.style.setProperty('--dc', dieColor(p));
       el.querySelector('.dname').textContent = p ? (id === S.you ? 'You' : p.name) : '?';
       const anim = st.anims[id];
       const can = st.stage === 'roll' && st.eligible.includes(id);
@@ -1289,7 +1321,7 @@
       <div class="cb-dmg" title="Damage if it connects">${at.dmg == null ? '?' : at.dmg}</div>
       ${mods ? `<div class="cb-mods">${mods}</div>` : ''}
       ${iAttack ? blockSec + attSec : attSec + blockSec}
-      ${iAttack ? `<div class="cb-btns"><button class="btn tiny" data-cb="plus" data-at="${at.id}">+X</button><button class="btn tiny" data-cb="times" data-at="${at.id}">×N</button>${at.mods.length ? `<button class="btn tiny" data-cb="reset" data-at="${at.id}">reset</button>` : ''}</div>` : ''}
+      ${iAttack && combatMods ? `<div class="cb-btns"><button class="btn tiny" data-cb="plus" data-at="${at.id}">+X</button><button class="btn tiny" data-cb="times" data-at="${at.id}">×N</button>${at.mods.length ? `<button class="btn tiny" data-cb="reset" data-at="${at.id}">reset</button>` : ''}</div>` : ''}
     </div>`;
   }
 
@@ -1343,14 +1375,25 @@
     const ready = cb.participants
       .map((id) => `<span class="cb-chip ${cb.done[id] ? 'ok' : ''}">${esc(id === S.you ? 'You' : (playerById(id) || {}).name || '?')} ${cb.done[id] ? '✓' : '…'}</span>`)
       .join('');
+    const iAttack2 = cb.attacker === S.you;
+    const split = !U.phone && boardView === 'grid';
     return `<span class="cb-total">Total <b>${playerTotal}</b></span><span class="cb-ready">${ready}</span><span class="spacer"></span>
-      ${U.phone ? '' : '<button class="btn small" data-cb="hide">View field</button>'}
+      <span class="cb-zoom"><button class="btn small" data-cb="zout" title="Smaller">−</button><button class="btn small" data-cb="zin" title="Bigger">+</button></span>
+      ${iAttack2 ? `<button class="btn small ${combatMods ? 'on' : ''}" data-cb="mods" title="Show +X / ×N buttons on every attacker">Modifiers</button>` : ''}
+      ${split ? `<button class="btn small" data-cb="split">${combatSplit ? 'Full screen' : 'Per player'}</button>` : ''}
+      ${U.phone || (split && combatSplit) ? '' : '<button class="btn small" data-cb="hide">View field</button>'}
       ${iAttack && !U.phone ? '<button class="btn small ghost" data-cb="cancel">Cancel combat</button>' : ''}
       ${inIt ? `<button class="btn ${cb.done[S.you] ? '' : 'primary'} cb-donebtn" data-cb="done">${cb.done[S.you] ? 'Not done yet' : 'Done ✓'}</button>` : ''}`;
   }
 
   let combatHidden = false;
   let lastCombatKey = null;
+  let combatMods = false; // show the +X / ×N buttons on every attacker
+  let combatSplit = Store.get('mtgtt.combatSplit') === true; // All battlefields: combat over each player instead of full screen
+  const ZOOM_KEY = () => `mtgtt.combatZoom.${U.phone ? 'phone' : 'desktop'}`;
+  const combatZoom = () => clamp(Number(Store.get(ZOOM_KEY())) || 1, 0.5, 2.5);
+  /** Card width in the combat screen: bigger by default, zoom remembered on this device. */
+  const combatCardW = (base) => `${Math.round(base * combatZoom())}px`;
 
   /** Computer: combat is a see-through layer over the whole table. */
   function renderCombat() {
@@ -1379,9 +1422,18 @@
       });
       document.body.appendChild(back);
     }
-    box.hidden = combatHidden;
-    back.hidden = !combatHidden;
+    const split = combatSplit && boardView === 'grid';
+    renderCombatCells(split);
+    box.hidden = combatHidden || split;
+    back.hidden = !combatHidden || split;
     if (combatHidden) return;
+    if (split) {
+      // just the bar, at the bottom
+      box.hidden = false;
+      box.className = 'combat combat-ov split';
+      box.innerHTML = `<div class="cbo-bar">${combatBarHTML(cb.attacks.filter((a) => a.target.kind === 'player').reduce((n, a) => n + (a.dmg || 0), 0))}</div>`;
+      return;
+    }
     const def = currentCombatDef();
     const defP = playerById(def);
     const attP = playerById(cb.attacker);
@@ -1390,14 +1442,50 @@
     const avail = combatAvailable();
     const iAttack = cb.attacker === S.you;
     box.className = 'combat combat-ov';
+    box.style.setProperty('--cbw', combatCardW(110));
     box.innerHTML = `<div class="cbo-top">
         ${defs.length > 1 ? '<button class="btn small" data-cb="prev">◀</button>' : ''}
         <span>${esc(iAttack ? 'You' : attP ? attP.name : '?')} attacking <b>${esc(def === S.you ? 'you' : defP ? defP.name : '?')}</b></span>
         ${defs.length > 1 ? '<button class="btn small" data-cb="next">▶</button>' : ''}
       </div>
-      <div class="cbo-main">${t.html}</div>
+      <div class="cbo-main"><div class="cbo-inner">${t.html}</div></div>
       ${avail.length ? `<div class="cbo-avail"><span class="cbo-lbl">${iAttack ? 'Drag up to attack' : 'Drag up to block'}</span><div class="cbo-cards">${avail.map((c) => cardHTML(c, 'avail')).join('')}</div></div>` : ''}
       <div class="cbo-bar">${combatBarHTML(t.playerTotal)}</div>`;
+  }
+
+  /** All battlefields + "Per player": each player's square gets its own combat layer. */
+  function renderCombatCells(on) {
+    const cb = S.combat;
+    for (const el of $$('.cb-cell')) if (!on || !cb || !el.closest('.player-area.in-grid')) el.remove();
+    if (!on || !cb) return;
+    const avail = combatAvailable();
+    for (const p of S.players) {
+      const area = areaEl(p.id);
+      if (!area || !area.classList.contains('in-grid')) continue;
+      const bf = $('.bf', area);
+      let el = $('.cb-cell', bf);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'cb-cell';
+        el.addEventListener('click', (e) => combatClick(e));
+        bf.appendChild(el);
+      }
+      el.style.setProperty('--cbw', combatCardW(70));
+      const isAttacker = p.id === cb.attacker;
+      let html = '';
+      if (isAttacker) {
+        html = `<div class="cbc-head">${ICONS.sword}<span>${esc(p.id === S.you ? 'You are' : `${p.name} is`)} attacking</span></div>`;
+        if (p.id === S.you) html += avail.length ? `<div class="cbo-cards cbc-avail">${avail.map((c) => cardHTML(c, 'avail')).join('')}</div><div class="muted small">Drag onto a player or planeswalker</div>` : '<div class="muted small">No untapped creatures left</div>';
+      } else {
+        const t = combatTargetsHTML(p.id);
+        html = `<div class="cbo-main"><div class="cbo-inner">${t.html}</div></div>`;
+        if (p.id === S.you && avail.length) html += `<div class="cbo-cards cbc-avail">${avail.map((c) => cardHTML(c, 'avail')).join('')}</div>`;
+      }
+      if (el.dataset.html !== html) {
+        el.dataset.html = html;
+        el.innerHTML = html;
+      }
+    }
   }
 
   $('#combat').addEventListener('click', (e) => combatClick(e));
@@ -1409,6 +1497,18 @@
     switch (b.dataset.cb) {
       case 'hide':
         combatHidden = true;
+        return render();
+      case 'mods':
+        combatMods = !combatMods;
+        return render();
+      case 'zin':
+      case 'zout':
+        Store.set(ZOOM_KEY(), clamp(combatZoom() * (b.dataset.cb === 'zin' ? 1.15 : 1 / 1.15), 0.5, 2.5));
+        for (const el of $$('.cb-cell')) el.dataset.html = '';
+        return render();
+      case 'split':
+        combatSplit = !combatSplit;
+        Store.set('mtgtt.combatSplit', combatSplit);
         return render();
       case 'prev':
         return switchCombatDef(-1);
@@ -1534,14 +1634,166 @@
     const m = e.target.closest('[data-mode]');
     if (m) {
       if (m.dataset.mode === 'done') finishMode();
-      else cancelMode();
+      else if (m.dataset.mode === 'n+' || m.dataset.mode === 'n-') {
+        if (mode) mode.n = clamp((mode.n || 1) + (m.dataset.mode === 'n+' ? 1 : -1), 1, 20);
+        renderModeBanner();
+      } else cancelMode();
     }
   });
 
   /* ======================================== proliferate / attach modes */
 
+  /** Life: slide right for damage, left for gain, ±1 to fine-tune. Applied when the window closes. */
+  let lifeOpen = false;
+  function lifeDialog(pid) {
+    if (!S || lifeOpen) return;
+    const p = playerById(pid);
+    if (!p) return;
+    lifeOpen = true;
+    let delta = 0;
+    const counters = Object.entries(p.counters || {});
+    const cmds = S.format === 'commander' ? Object.values(S.cards).filter((c) => c.isCommander && c.owner !== pid && !c.isToken) : [];
+    dialog({
+      title: `${p.id === S.you ? 'Your' : `${p.name}'s`} life`,
+      body: `<div class="lf-now"><span class="lf-old">${p.life}</span><span class="lf-arrow">→</span><b class="lf-new">${p.life}</b><span class="lf-desc muted"></span></div>
+        <div class="lf-slide"><span class="muted small">gain</span><input type="range" min="-20" max="20" step="1" value="0" class="lf-range"><span class="muted small">damage</span></div>
+        <div class="row gap lf-btns"><button class="btn" data-lf="-1">−1</button><button class="btn" data-lf="1">+1</button></div>
+        <p class="muted small" style="margin:0">Closes and applies when you click outside or press Done.</p>
+        ${counters.length || cmds.length ? '<div class="sect-title">Counters &amp; commander damage</div>' : ''}
+        ${counters.map(([k, v]) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span><button class="btn tiny" data-pc="${esc(k)}" data-d="-1">−</button><button class="btn tiny" data-pc="${esc(k)}" data-d="1">+</button></div>`).join('')}
+        ${cmds
+          .map((c) => {
+            const owner = playerById(c.owner);
+            const v = (p.cmdDamage || {})[c.id] || 0;
+            return `<div class="kv"><span class="k">${esc(owner ? owner.name : '?')} · ${esc(c.name)}</span><span class="v">${v}</span><button class="btn tiny" data-cmd="${c.id}" data-d="-1">−</button><button class="btn tiny" data-cmd="${c.id}" data-d="1">+</button></div>`;
+          })
+          .join('')}
+        <button class="btn small" data-pcadd="1">+ Player counter (poison, energy…)</button>`,
+      buttons: [{ label: 'Done', value: 'ok', primary: true }],
+      onMount(root) {
+        root.classList.add('life-modal');
+        const range = root.querySelector('.lf-range');
+        const draw = () => {
+          root.querySelector('.lf-new').textContent = String(p.life + delta);
+          root.querySelector('.lf-desc').textContent = delta < 0 ? `${-delta} damage` : delta > 0 ? `gain ${delta}` : '';
+          range.value = String(clamp(-delta, -20, 20));
+        };
+        range.addEventListener('input', () => {
+          delta = -Number(range.value);
+          draw();
+        });
+        root.addEventListener('click', async (e) => {
+          const b = e.target.closest('button');
+          if (!b) return;
+          if (b.dataset.lf) {
+            delta += Number(b.dataset.lf);
+            draw();
+          }
+          if (b.dataset.pc) act({ type: 'playerCounter', playerId: pid, name: b.dataset.pc, delta: Number(b.dataset.d) });
+          if (b.dataset.cmd) act({ type: 'cmdDamage', playerId: pid, sourceId: b.dataset.cmd, delta: Number(b.dataset.d) });
+          if (b.dataset.pcadd) {
+            const n = await askText('Add a player counter', 'poison');
+            if (n) act({ type: 'playerCounter', playerId: pid, name: n, delta: 1 });
+          }
+        });
+      },
+    }).then(() => {
+      lifeOpen = false;
+      // closing the window (Done, or clicking outside) applies the change; Undo fixes mistakes
+      if (delta) act({ type: 'life', playerId: pid, delta });
+    });
+  }
+
+  /** At 0 life (or 10 poison / 21 commander damage) ask whether you're out. */
+  const deadPrompted = {};
+  function checkDeath() {
+    const m = me();
+    if (!m || m.out || !S.turn.active || (S.setup && S.setup.stage !== 'done')) return;
+    const poison = Object.entries(m.counters || {}).find(([k]) => /poison/i.test(k));
+    const cmd = Object.values(m.cmdDamage || {}).some((v) => v >= 21);
+    const reason = m.life <= 0 ? `You're at ${m.life} life.` : poison && poison[1] >= 10 ? `You have ${poison[1]} poison counters.` : cmd ? "You've taken 21 commander damage from one commander." : null;
+    const key = `${S.id}:${reason}`;
+    if (!reason) {
+      for (const k of Object.keys(deadPrompted)) if (k.startsWith(`${S.id}:`)) delete deadPrompted[k];
+      return;
+    }
+    if (deadPrompted[key]) return;
+    deadPrompted[key] = true;
+    confirmBox('Are you out?', `${reason} Are you out of the game? (Undo or "Back in the game" if not.)`, "I'm out", true).then((ok) => {
+      if (ok) act({ type: 'setOut', value: true });
+    });
+  }
+
+  /** Winner banner, with confetti made of the losers' torn-up battlefield cards. */
+  function checkWinner() {
+    const w = S.winner;
+    if (!w) return;
+    const key = `mtgtt.won.${S.id}`;
+    let seen = null;
+    try {
+      seen = sessionStorage.getItem(key);
+    } catch {
+      /* ignore */
+    }
+    if (seen === String(w.seq)) return;
+    try {
+      sessionStorage.setItem(key, String(w.seq));
+    } catch {
+      /* ignore */
+    }
+    if (firstState) return; // don't replay on reload
+    const winner = playerById(w.id);
+    const imgs = [];
+    for (const pid of w.losers || []) {
+      const p = playerById(pid);
+      if (p) for (const id of p.zones.battlefield) if (S.cards[id] && S.cards[id].img && !S.cards[id].hidden) imgs.push(S.cards[id].img);
+    }
+    winBanner(winner ? (winner.id === S.you ? 'You win!' : `${winner.name} wins!`) : 'Game over', imgs);
+  }
+
+  function winBanner(text, imgs) {
+    const old = $('#win');
+    if (old) old.remove();
+    const box = document.createElement('div');
+    box.id = 'win';
+    box.className = 'win';
+    box.innerHTML = `<div class="win-card"><div class="win-title">${esc(text)}</div><button class="btn primary" id="win-ok">Nice</button></div>`;
+    document.body.appendChild(box);
+    box.querySelector('#win-ok').addEventListener('click', () => box.remove());
+    const n = 90;
+    for (let i = 0; i < n; i++) {
+      const bit = document.createElement('div');
+      bit.className = 'shred';
+      const w = 18 + Math.random() * 30;
+      const h = 14 + Math.random() * 34;
+      bit.style.width = `${w}px`;
+      bit.style.height = `${h}px`;
+      if (imgs.length) {
+        const img = imgs[i % imgs.length];
+        bit.style.backgroundImage = `url("${img}")`;
+        bit.style.backgroundSize = '200px 280px';
+        bit.style.backgroundPosition = `${-Math.random() * 180}px ${-Math.random() * 250}px`;
+      } else bit.style.background = ['#d6a531', '#4f8fe0', '#e05252', '#4caf6a'][i % 4];
+      // jagged torn edges
+      const j = () => `${Math.round(Math.random() * 22)}%`;
+      bit.style.clipPath = `polygon(${j()} 0, 100% ${j()}, calc(100% - ${j()}) 100%, 0 calc(100% - ${j()}))`;
+      bit.style.left = `${Math.random() * 100}vw`;
+      box.appendChild(bit);
+      const dur = 2600 + Math.random() * 2600;
+      const drift = (Math.random() - 0.5) * 260;
+      const spin = (Math.random() - 0.5) * 1080;
+      bit.animate(
+        [
+          { transform: `translate(0, -60px) rotate(0deg)`, opacity: 1 },
+          { transform: `translate(${drift}px, 110vh) rotate(${spin}deg)`, opacity: 0.9 },
+        ],
+        { duration: dur, delay: Math.random() * 1400, easing: 'cubic-bezier(.3,.1,.6,1)', fill: 'both' },
+      ).onfinish = () => bit.remove();
+    }
+  }
+
   function startProliferate() {
-    mode = { kind: 'proliferate', cards: new Set(), players: new Set() };
+    mode = { kind: 'proliferate', cards: new Set(), players: new Set(), n: 1 };
     hideMenu();
     render();
   }
@@ -1558,7 +1810,7 @@
   }
 
   function finishMode() {
-    if (mode && mode.kind === 'proliferate') act({ type: 'proliferate', cardIds: [...mode.cards], playerIds: [...mode.players] });
+    if (mode && mode.kind === 'proliferate') act({ type: 'proliferate', cardIds: [...mode.cards], playerIds: [...mode.players], n: mode.n || 1 });
     mode = null;
     render();
   }
@@ -1607,6 +1859,7 @@
     el.innerHTML =
       mode.kind === 'proliferate'
         ? `<span><b>Proliferate:</b> ${U.phone ? 'tap' : 'click'} permanents and players with counters (${mode.cards.size + mode.players.size} picked)</span>
+           <span class="prolif-n"><button class="btn small" data-mode="n-">−</button><b>${mode.n || 1}×</b><button class="btn small" data-mode="n+">+</button></span>
            <button class="btn small primary" data-mode="done">Done</button><button class="btn small" data-mode="cancel">Cancel</button>`
         : `<span><b>Attach ${esc(mode.name)}:</b> ${U.phone ? 'tap' : 'click'} the creature to attach it to</span><button class="btn small" data-mode="cancel">Cancel</button>`;
   }
@@ -1692,10 +1945,40 @@
       document.body.appendChild(g);
       drag.ghost = g;
       drag.el.classList.add('dragging-src');
+      drag.stack = stackInfo(drag.card);
+      drag.extraTop = 0;
+      if (drag.stack) {
+        drag.wiggle = makeWiggle();
+        if (drag.stack.i === 0) {
+          // the front card carries the whole stack
+          const z = (views[drag.card.zp] || { z: 1 }).z;
+          const step = E.STACK_STEP * z;
+          const n = drag.stack.arr.length;
+          drag.extraTop = (n - 1) * step;
+          g.classList.add('stack-ghost');
+          g.style.height = `${drag.h + drag.extraTop}px`;
+          g.innerHTML = drag.stack.arr
+            .slice()
+            .reverse()
+            .map((id, k) => `<div class="sg-card" style="top:${k * step}px;height:${drag.h}px">${cardInner(S.cards[id])}</div>`)
+            .join('');
+          drag.srcEls = drag.stack.arr.map((id) => $(`.bf .card[data-id="${id}"]`)).filter(Boolean);
+          for (const x of drag.srcEls) x.classList.add('dragging-src');
+        }
+      }
     }
     const g = drag.ghost;
+    if (drag.wiggle && !drag.broken && drag.wiggle(e.clientX)) {
+      drag.broken = true;
+      toast('Broke it off the stack');
+      if (drag.srcEls) for (const x of drag.srcEls) if (x !== drag.el) x.classList.remove('dragging-src');
+      g.classList.remove('stack-ghost');
+      g.innerHTML = cardInner(drag.card);
+      g.style.height = `${drag.h}px`;
+      drag.extraTop = 0;
+    }
     g.style.left = `${e.clientX - (drag.offX / 100) * drag.w}px`;
-    g.style.top = `${e.clientY - (drag.offY / 140) * drag.h}px`;
+    g.style.top = `${e.clientY - (drag.offY / 140) * drag.h - drag.extraTop}px`;
     const t = dropTargetAt(e.clientX, e.clientY);
     const hl = t && t.dataset.drop !== 'bf' ? t : null;
     if (hl !== lastHoverTarget) {
@@ -1727,11 +2010,84 @@
       return;
     }
     d.el.classList.remove('dragging-src');
+    if (d.srcEls) for (const x of d.srcEls) x.classList.remove('dragging-src');
     if (d.ghost) d.ghost.remove();
     const under = document.elementFromPoint(e.clientX, e.clientY);
     const t = under ? under.closest('[data-drop]') : null;
     if (t) dropOn(d, t, e.clientX, e.clientY, under);
   });
+
+  /* --------------------------------------------- land / artifact stacks */
+
+  const isStackable = (c) => !!c && !c.hidden && /\b(Land|Artifact)\b/.test((c.flipped && c.backTypeLine) || c.typeLine || '');
+  const isCreatureCard = (c) => !!c && /\bCreature\b/.test((c.flipped && c.backTypeLine) || c.typeLine || '');
+  /** The stack a battlefield card is in: { arr (front first), i } or null. */
+  function stackInfo(c) {
+    if (!c || c.zone !== 'battlefield') return null;
+    const p = playerById(c.zp);
+    for (const arr of (p && p.stacks) || []) {
+      const i = arr.indexOf(c.id);
+      if (i >= 0) return { arr, i };
+    }
+    return null;
+  }
+  /** Shake a card left and right while dragging it to pull it out of its stack. */
+  function makeWiggle() {
+    let pivot = null;
+    let dir = 0;
+    const flips = [];
+    return (x) => {
+      if (pivot === null) pivot = x;
+      const d = x - pivot;
+      if (Math.abs(d) < 12) return false;
+      const nd = Math.sign(d);
+      if (dir && nd !== dir) flips.push(performance.now());
+      dir = nd;
+      pivot = x;
+      while (flips.length && performance.now() - flips[0] > 900) flips.shift();
+      return flips.length >= 3;
+    };
+  }
+  /**
+   * Dropping a land/artifact: onto another one makes (or joins) a stack, a card from the
+   * middle of a stack slides through it, and a wiggled card breaks off. Returns true if handled.
+   * x/y = where the card's top-left would land on the table; cy = pointer y on screen.
+   */
+  async function stackDrop(c, pid, x, y, cy, under, broken) {
+    if (!isStackable(c)) return false;
+    const tEl = under && under.closest('.card[data-id]');
+    const t = tEl && tEl.dataset.id !== c.id ? getCard(tEl.dataset.id) : null;
+    const st = stackInfo(c);
+    const ownStackMove = st && st.i === 0 && !broken && t && st.arr.includes(t.id); // moving a whole stack a little
+    if (t && !ownStackMove && t.zone === 'battlefield' && t.zp === pid && isStackable(t) && !(isEquipLike(c) && isCreatureCard(t))) {
+      const ts = stackInfo(t);
+      let index;
+      if (!ts || ts.i === 0) {
+        const r = tEl.getBoundingClientRect();
+        index = cy > r.top + r.height / 2 ? 0 : ts ? ts.arr.length : 1; // lower half = front, upper half = back
+      } else index = ts.i;
+      if (c.zone !== 'battlefield' || c.zp !== pid) {
+        const r = await act({ type: 'move', cardId: c.id, to: 'battlefield', playerId: pid, x, y });
+        if (r.error || r.pending) return true;
+      }
+      act({ type: 'stackInsert', cardId: c.id, targetId: t.id, index, single: !!broken });
+      return true;
+    }
+    if (st && c.zp === pid) {
+      if (broken) {
+        act({ type: 'stackBreak', cardId: c.id, x, y });
+        return true;
+      }
+      if (st.i > 0) {
+        // not the front card: it just slides through its stack
+        const front = S.cards[st.arr[0]];
+        const idx = clamp(Math.round((front.y - y) / E.STACK_STEP), 0, st.arr.length - 1);
+        act({ type: 'stackInsert', cardId: c.id, targetId: front.id, index: idx });
+        return true;
+      }
+    }
+    return false;
+  }
 
   async function dropOn(d, t, cx, cy, under) {
     const c = d.card;
@@ -1739,6 +2095,13 @@
       case 'bf': {
         const pid = t.dataset.player;
         const targetCard = under && under.closest('.card[data-id]');
+        {
+          const r0 = t.getBoundingClientRect();
+          const z0 = views[pid].z;
+          const sx = clamp((cx - r0.left) / z0 - d.offX, 0, S.table.w - S.table.cardW);
+          const sy = clamp((cy - r0.top) / z0 - d.offY, 0, S.table.h - S.table.cardH);
+          if (await stackDrop(c, pid, sx, sy, cy, under, d.broken)) return;
+        }
         if (targetCard && targetCard.dataset.id !== c.id && isEquipLike(c)) {
           const host = getCard(targetCard.dataset.id);
           if (host && host.zone === 'battlefield') {
@@ -1978,7 +2341,14 @@
       if (c.attachedTo) items.push({ label: 'Unattach', fn: () => act({ type: 'unattach', cardId: c.id }) });
       else items.push({ label: 'Attach to…', fn: () => startAttach(c) });
       items.push({ label: c.note ? 'Edit note…' : 'Add note…', fn: () => noteDialog(c) });
-      if (!c.hidden) items.push({ label: 'Create a token copy', fn: () => act({ type: 'clone', cardId: c.id }) });
+      if (!c.hidden)
+        items.push({
+          label: 'Create token copies…',
+          fn: async () => {
+            const n = await askNumber(`How many token copies of ${c.name}?`, 1);
+            if (n) act({ type: 'clone', cardId: c.id, count: n });
+          },
+        });
       if (U.phone)
         for (const p of S.players)
           if (p.id !== c.zp) items.push({ label: `Give control to ${p.name}`, fn: () => act({ type: 'move', cardId: c.id, to: 'battlefield', playerId: p.id }) });
@@ -1986,6 +2356,8 @@
       items.push({ label: 'Transform / flip', fn: () => act({ type: 'flip', cardId: c.id }) });
     }
     if (!c.hidden && c.zone !== 'library') items.push({ label: 'Effects…', fn: () => effectsDialog(c) });
+    if (!c.hidden && c.zone !== 'library') items.push({ label: 'Edit card info…', fn: () => editCardDialog(c) });
+    if (c.isCommander && !c.hidden) items.push({ label: `Edit commander tax ({${(c.castCount || 0) * 2}})…`, fn: () => taxDialog(c) });
     if (c.tokens && c.tokens.length) {
       items.push({ sep: true });
       for (const t of c.tokens.slice(0, 6)) items.push({ label: `Create token: ${t.name}`, fn: () => createRelatedToken(t) });
@@ -2011,6 +2383,40 @@
       items.push({ label: 'Open on Scryfall ↗', href: scryfallUrl(c) });
     }
     return items;
+  }
+
+  async function editCardDialog(c) {
+    const back = c.flipped && c.backName;
+    const name = back ? c.backName : c.name;
+    const tl = (back ? c.backTypeLine : c.typeLine) || '';
+    const pt = (back ? c.backPt : c.pt) || '';
+    const oracle = (back ? c.backOracle : c.oracle) || '';
+    const { value, root } = await dialog({
+      title: 'Edit card info',
+      wide: true,
+      body: `<p class="muted small" style="margin:0">For when the game changes a card: a new base power/toughness, new creature types, and so on. Only this copy changes.</p>
+        <label class="form">Name <input id="ec-name" value="${esc(name)}"></label>
+        <label class="form">Type line <input id="ec-type" value="${esc(tl)}" placeholder="e.g. Creature — Elf Druid"></label>
+        <div class="row gap"><label class="form" style="flex:1">Base power/toughness <input id="ec-pt" value="${esc(pt)}" placeholder="e.g. 2/3"></label>
+          <label class="form" style="flex:1">Loyalty <input id="ec-loy" value="${esc(c.loyalty || '')}" placeholder="planeswalkers"></label></div>
+        <label class="form">Rules text <textarea id="ec-text" rows="5">${esc(oracle)}</textarea></label>`,
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Save', value: 'ok', primary: true }],
+    });
+    if (value !== 'ok') return;
+    act({
+      type: 'editCard',
+      cardId: c.id,
+      name: root.querySelector('#ec-name').value,
+      typeLine: root.querySelector('#ec-type').value,
+      pt: root.querySelector('#ec-pt').value,
+      loyalty: root.querySelector('#ec-loy').value,
+      oracle: root.querySelector('#ec-text').value,
+    });
+  }
+
+  async function taxDialog(c) {
+    const n = await askNumber(`How many times has ${c.name} been cast from the command zone? (tax is 2 per cast)`, c.castCount || 0);
+    if (n !== null && n !== undefined && n !== false) act({ type: 'setCastCount', cardId: c.id, count: n });
   }
 
   function libraryMenu() {
@@ -2062,8 +2468,12 @@
         <label class="form">Colour <select id="rv-color"><option value="">any</option>${['W', 'U', 'B', 'R', 'G', 'C', 'M']
           .map((c) => `<option value="${c}">${{ W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green', C: 'colorless', M: 'multicolored' }[c]}</option>`)
           .join('')}</select></label>
-        <label class="form">Mana value <span class="row gap"><select id="rv-op"><option value="">any</option><option value="<=">at most</option><option value="=">exactly</option><option value=">=">at least</option></select>
-          <input id="rv-mv" type="number" min="0" value="3" style="width:80px"></span></label>`,
+        <label class="form">Mana value <span class="row gap"><select id="rv-op"><option value="">any</option><option value="<">less than</option><option value="<=">at most</option><option value="=">exactly</option><option value=">=">at least</option></select>
+          <input id="rv-mv" type="number" min="0" value="3" style="width:80px"></span></label>
+        <div class="sect-title">Skip past</div>
+        <label class="row gap"><input type="checkbox" id="rv-nonland"> Lands (stop at a nonland card)</label>
+        <label class="form">Anything with this word in its name or type <input id="rv-ex" placeholder="e.g. Equipment"></label>
+        <p class="muted small" style="margin:0">Cascade: skip lands, mana value less than X. Discover N: skip lands, mana value at most N. Then choose "bottom in a random order" for the rest.</p>`,
       buttons: [{ label: 'Cancel', value: null }, { label: 'Reveal', value: 'ok', primary: true }],
     });
     if (value !== 'ok') return;
@@ -2073,6 +2483,8 @@
       color: root.querySelector('#rv-color').value,
       mvOp: root.querySelector('#rv-op').value,
       mv: Number(root.querySelector('#rv-mv').value) || 0,
+      nonland: root.querySelector('#rv-nonland').checked,
+      exclude: root.querySelector('#rv-ex').value.trim(),
     });
   }
 
@@ -2328,10 +2740,14 @@
 
   const KIND_LABEL = {
     pt: 'Creatures get +X/+Y',
-    forEach: 'This gets +X/+Y for each…',
-    etb: 'Creatures enter with extra counters',
+    forEach: 'Creatures get +X/+Y for each… (Coat of Arms)',
+    etb: 'Creatures enter with extra counters / a type (Master Biomancer)',
     keyword: 'Creatures have a keyword',
+    type: 'Creatures are a type too',
   };
+  const OP_OPTS = [['', 'any'], ['<=', 'at most'], ['=', 'exactly'], ['>=', 'at least']];
+  const EF_FIELDS = ['who', 'filter', 'p', 't', 'count', 'where', 'other', 'shares', 'n', 'nFrom', 'counter', 'keyword', 'typeAdd', 'color', 'mvOp', 'mv',
+    'kw', 'pOp', 'pN', 'tOp', 'tN', 'ckw', 'cpOp', 'cpN', 'ctOp', 'ctN'];
 
   function effectFormHTML(e) {
     const who = (v) => `<select data-f="who">${[
@@ -2346,6 +2762,14 @@
       .join('')}</select>`;
     const filter = `<input data-f="filter" placeholder="Only this type (optional), e.g. Dragon" value="${esc(e.filter || '')}">`;
     const pt = `<span class="row gap"><input data-f="p" type="number" value="${e.p || 0}" style="width:70px"> / <input data-f="t" type="number" value="${e.t || 0}" style="width:70px"></span>`;
+    const opSel = (f, v) => `<select data-f="${f}">${OP_OPTS.map(([k, l]) => `<option value="${k}" ${(v || '') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+    /** keyword + power/toughness filters; pre '' = who gets it, 'c' = what is counted */
+    const stats = (pre, title) => `<details class="ef-more" ${e[`${pre}kw`] || e[`${pre}pOp`] || e[`${pre}tOp`] ? 'open' : ''}><summary>${title}</summary>
+      <div class="row gap ef-extra">
+        <label class="form">With keyword <input data-f="${pre}kw" value="${esc(e[`${pre}kw`] || '')}" placeholder="e.g. flying" style="width:120px"></label>
+        <label class="form">Power <span class="row gap">${opSel(`${pre}pOp`, e[`${pre}pOp`])}<input data-f="${pre}pN" type="number" value="${e[`${pre}pN`] != null ? e[`${pre}pN`] : 2}" style="width:58px"></span></label>
+        <label class="form">Toughness <span class="row gap">${opSel(`${pre}tOp`, e[`${pre}tOp`])}<input data-f="${pre}tN" type="number" value="${e[`${pre}tN`] != null ? e[`${pre}tN`] : 2}" style="width:58px"></span></label>
+      </div><p class="muted small" style="margin:0">Power/toughness here is the card's own, plus counters and bonuses (not other effects).</p></details>`;
     let body = `<label class="form">Kind <select data-f="kind">${Object.entries(KIND_LABEL)
       .map(([k, l]) => `<option value="${k}" ${e.kind === k ? 'selected' : ''}>${l}</option>`)
       .join('')}</select></label>`;
@@ -2355,10 +2779,13 @@
       <label class="form">Mana value <span class="row gap"><select data-f="mvOp"><option value="">any</option>${[['<=', 'at most'], ['=', 'exactly'], ['>=', 'at least']]
         .map(([k, l]) => `<option value="${k}" ${e.mvOp === k ? 'selected' : ''}>${l}</option>`)
         .join('')}</select><input data-f="mv" type="number" min="0" value="${e.mv != null ? e.mv : 3}" style="width:64px"></span></label></div>`;
-    if (e.kind === 'pt') body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label>${extra}<label class="form">Get +X / +Y ${pt}</label>`;
+    const whoBlock = `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label>`;
+    if (e.kind === 'pt') body += `${whoBlock}${extra}${stats('', 'Only ones with a keyword / power / toughness…')}<label class="form">Get +X / +Y ${pt}</label>`;
     if (e.kind === 'forEach')
-      body += `<label class="form">Gets +X / +Y ${pt}</label>
-        <label class="form">for each <input data-f="count" value="${esc(e.count || 'artifact')}" placeholder="artifact, creature, land, Elf…"></label>
+      body += `${whoBlock}${stats('', 'Only ones with a keyword / power / toughness…')}
+        <label class="form">Get +X / +Y ${pt}</label>
+        <div class="sect-title">For each…</div>
+        <label class="form">Type <input data-f="count" value="${esc(e.count || 'artifact')}" placeholder="artifact, creature, land, Elf…"></label>
         <label class="form">… <select data-f="where">${[
           ['you', 'you control'],
           ['opp', 'your opponents control'],
@@ -2367,12 +2794,18 @@
         ]
           .map(([k, l]) => `<option value="${k}" ${e.where === k ? 'selected' : ''}>${l}</option>`)
           .join('')}</select></label>
-        <label class="row gap"><input type="checkbox" data-f="other" ${e.other ? 'checked' : ''}> don't count this card itself ("each other…")</label>${extra}`;
+        <label class="row gap"><input type="checkbox" data-f="other" ${e.other ? 'checked' : ''}> "each other…" (don't count the creature getting the bonus)</label>
+        <label class="row gap"><input type="checkbox" data-f="shares" ${e.shares ? 'checked' : ''}> only ones that share a creature type with it (Coat of Arms)</label>
+        ${extra}${stats('c', 'Only count ones with a keyword / power / toughness…')}`;
     if (e.kind === 'etb')
-      body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label>${extra}
-        <label class="form">Enter with <span class="row gap"><input data-f="n" type="number" min="1" value="${e.n || 1}" style="width:70px"> extra <input data-f="counter" value="${esc(e.counter || '+1/+1')}" style="width:110px"> counter(s)</span></label>`;
+      body += `${whoBlock}${extra}${stats('', 'Only ones with a keyword / power / toughness…')}
+        <label class="form">Enter with <span class="row gap"><select data-f="nFrom"><option value="" ${e.nFrom ? '' : 'selected'}>this many</option><option value="power" ${e.nFrom === 'power' ? 'selected' : ''}>X = this card's power</option></select>
+          <input data-f="n" type="number" min="0" value="${e.n != null ? e.n : 1}" style="width:64px" ${e.nFrom === 'power' ? 'hidden' : ''}> extra <input data-f="counter" value="${esc(e.counter || '+1/+1')}" style="width:100px"> counter(s)</span></label>
+        <label class="form">…and become this type too (optional) <input data-f="typeAdd" value="${esc(e.typeAdd || '')}" placeholder="e.g. Mutant"></label>`;
     if (e.kind === 'keyword')
-      body += `<label class="form">Who ${who(e.who)}</label><label class="form">Type filter ${filter}</label>${extra}<label class="form">Have <input data-f="keyword" value="${esc(e.keyword || '')}" placeholder="Flying, Trample, Haste…"></label>`;
+      body += `${whoBlock}${extra}${stats('', 'Only ones with a keyword / power / toughness…')}<label class="form">Have <input data-f="keyword" value="${esc(e.keyword || '')}" placeholder="Flying, Trample, Haste…"></label>`;
+    if (e.kind === 'type')
+      body += `${whoBlock}${extra}${stats('', 'Only ones with a keyword / power / toughness…')}<label class="form">Are also a <input data-f="typeAdd" value="${esc(e.typeAdd || '')}" placeholder="e.g. Zombie, Elf"></label>`;
     return body;
   }
 
@@ -2382,7 +2815,9 @@
       if (!el) return undefined;
       return el.type === 'checkbox' ? el.checked : el.value;
     };
-    return E.cleanEffects([{ kind, who: v('who'), filter: v('filter'), p: v('p'), t: v('t'), count: v('count'), where: v('where'), other: v('other'), n: v('n'), counter: v('counter'), keyword: v('keyword'), color: v('color'), mvOp: v('mvOp'), mv: v('mv') }])[0];
+    const raw = { kind };
+    for (const f of EF_FIELDS) raw[f] = v(f);
+    return E.cleanEffects([raw])[0];
   }
 
   /** Build / edit one effect. Resolves with the effect or null. */
@@ -2406,6 +2841,10 @@
           if (ev.target.dataset.f === 'kind') {
             eff = { ...readEffectForm(form, eff.kind), kind: ev.target.value };
             draw();
+          } else if (ev.target.dataset.f === 'nFrom') {
+            const n = form.querySelector('[data-f="n"]');
+            if (n) n.hidden = ev.target.value === 'power';
+            preview();
           } else preview();
         });
         form.addEventListener('input', preview);
@@ -2499,7 +2938,7 @@
           try {
             results = await I.searchTokens(q);
             box.innerHTML = results.length
-              ? results.map((t, i) => `<button data-i="${i}" title="${esc(t.name)} ${esc(t.typeLine)}"><img src="${esc(t.img)}" alt="${esc(t.name)}" loading="lazy"></button>`).join('')
+              ? results.map((t, i) => `<button data-tk="${i}" title="${esc(t.name)} ${esc(t.typeLine)}"><img src="${esc(t.img)}" alt="${esc(t.name)}" loading="lazy"></button>`).join('')
               : '<p class="muted">No tokens found. Make your own below.</p>';
           } catch (err) {
             box.innerHTML = `<p class="err">${esc(err.message)}</p>`;
@@ -2518,8 +2957,10 @@
           else if (b.dataset.q) {
             root.querySelector('#tk-q').value = b.dataset.q;
             search(b.dataset.q);
-          } else if (b.dataset.i) {
-            act({ type: 'createToken', ...results[Number(b.dataset.i)], count: count(), playerId: pid });
+          } else if (b.dataset.tk !== undefined) {
+            const t = results[Number(b.dataset.tk)];
+            if (!t) return;
+            act({ type: 'createToken', ...t, count: count(), playerId: pid });
             close(null);
           } else if (b.id === 'tk-custom') {
             const name = root.querySelector('#tk-name').value.trim();
@@ -2731,6 +3172,7 @@
 
   const FELTS = ['#1a2a24', '#1d2a3a', '#2b1f33', '#3a1f1f', '#3b3220', '#1f3333', '#2a2a2a', '#0f3d24'];
 
+  const PLAYER_COLORS = ['#e05252', '#4f8fe0', '#4caf6a', '#d6a531', '#a66bd6', '#e07a3a', '#3fb6b0', '#d65f9c', '#9aa3b2'];
   function settingsDialog() {
     const st = S.settings;
     const host = session && session.isHost;
@@ -2738,10 +3180,14 @@
     const pref = Store.get(LAYOUT_KEY) || 'auto';
     dialog({
       title: 'Settings',
-      body: `<div class="sect-title">Your battlefield colour</div>
+      body: `<div class="sect-title">Your colour</div>
+        <div class="felts">${PLAYER_COLORS.map((c) => `<button class="felt ${mine && mine.color === c ? 'on' : ''}" data-pcol="${c}" style="background:${c}" title="${c}"></button>`).join('')}
+          <label class="felt custom" title="Pick any colour"><input type="color" id="st-pcol" value="${(mine && mine.color) || '#4f8fe0'}"></label></div>
+        <div class="sect-title">Your battlefield colour</div>
         <div class="felts">${FELTS.map((c) => `<button class="felt ${mine && mine.bfColor === c ? 'on' : ''}" data-felt="${c}" style="background:${c}" title="${c}"></button>`).join('')}
           <label class="felt custom" title="Pick any colour"><input type="color" id="st-felt" value="${(mine && mine.bfColor) || '#1a2a24'}"></label>
           <button class="btn small" data-felt="">Default</button></div>
+        <label class="row gap"><input type="checkbox" id="st-autostack" ${mine && mine.autoStack ? 'checked' : ''}> Stack lands and artifacts with the same name automatically</label>
         <div class="sect-title">Game</div>
         <label class="row gap"><input type="checkbox" id="st-untap" ${st.autoUntap ? 'checked' : ''}> Untap automatically when a turn passes</label>
         <label class="row gap"><input type="checkbox" id="st-draw" ${st.autoDraw ? 'checked' : ''}> Draw automatically when a turn passes</label>
@@ -2765,6 +3211,10 @@
         root.addEventListener('click', async (e) => {
           const b = e.target.closest('button');
           if (!b) return;
+          if (b.dataset.pcol) {
+            act({ type: 'setPlayerColor', color: b.dataset.pcol });
+            for (const x of $$('[data-pcol]', root)) x.classList.toggle('on', x === b);
+          }
           if (b.dataset.felt !== undefined) {
             act({ type: 'setColor', color: b.dataset.felt });
             for (const x of $$('.felt', root)) x.classList.toggle('on', x === b);
@@ -2779,6 +3229,8 @@
           if (b.id === 'st-backup') downloadJSON(session.game, `mtg-game-${S.id}-${new Date().toISOString().slice(0, 10)}.json`);
         });
         root.querySelector('#st-felt').addEventListener('change', (e) => act({ type: 'setColor', color: e.target.value }));
+        root.querySelector('#st-pcol').addEventListener('change', (e) => act({ type: 'setPlayerColor', color: e.target.value }));
+        root.querySelector('#st-autostack').addEventListener('change', (e) => act({ type: 'setAutoStack', value: e.target.checked }));
       },
     }).then(async ({ value, root }) => {
       if (value !== 'ok') return;
@@ -2814,7 +3266,8 @@
         <b>Combat</b><span>Tap the Combat phase. Drag creatures to the top edge to attack (or block), or tap the combat zone. Done is in the bar at the bottom.</span>
         <b>Library &amp; graveyard</b><span>They peek in from the right edge. Tap the library for its menu, double-tap to draw. <i>Other zones</i> shows exile and the command zone.</span>
         <b>Life</b><span>Tap a life badge. Slide right for damage, left for gain, ±1 to fine-tune; it's applied when you close the window (Undo fixes mistakes).</span>
-        <b>Log</b><span>The Log button at the top shows the log beside the battlefield.</span>
+        <b>Log &amp; chat</b><span>The Log button at the top shows the log beside the battlefield, with a chat box under it.</span>
+        <b>Land stacks</b><span>Hold a land or artifact and drop it on another: the bottom half puts it in front, the top half at the back. Dragging the front card moves the whole stack; give a card a wiggle while dragging to pull it out.</span>
         <b>Menu ☰</b><span>All battlefields, zoom, d20, tokens, proliferate, undo and settings (hide the arrows or the side piles there).</span>
         <b>Phases</b><span>Tap the phases along the top as you go. Pass turn is at the end. Portrait or landscape both work.</span>
       </div>`
@@ -2828,8 +3281,12 @@
         <b>Effects</b><span>Right-click → Effects… to set up what a card does (anthems, "for each" bonuses, extra counters, keywords). Totals update automatically.</span>
         <b>Library</b><span>Click for the menu (draw, mill, peek, reveal until…, search, shuffle). Double-click (or <kbd>D</kbd>) to draw.</span>
         <b>Counters</b><span>Right-click a permanent → Counters…: type numbers or use ± and press Save (✕ throws changes away). Permanents with counters show them when right-clicked.</span>
-        <b>Combat</b><span>Click the Combat phase (or Combat). Drag creatures up from the bottom row onto the player or a planeswalker; defenders drag blockers onto a column. <i>View field</i> hides the combat screen for a moment. +X / ×N change a column's damage; everyone presses Done when ready.</span>
-        <b>Reactions</b><span>Hover a chat or log line and click ☺︎+.</span>
+        <b>Combat</b><span>Click the Combat phase (or Combat). Drag creatures up from the bottom row onto the player or a planeswalker; defenders drag blockers onto a column. − / + zooms, <i>Modifiers</i> shows +X / ×N on every attacker, <i>View field</i> hides the screen for a moment. In All battlefields, <i>Per player</i> puts combat over each player's square. +X / ×N change a column's damage; everyone presses Done when ready.</span>
+        <b>Reactions</b><span>Hover a chat or log line and click ☺︎ on the left.</span>
+        <b>Land stacks</b><span>Drop a land or artifact onto another: bottom half = in front, top half = at the back, or onto a name bar to slot it in. Drag the front card to move the whole stack, drag a back card to re-order it, and wiggle a card while dragging to break it off. Settings can stack same-name ones automatically.</span>
+        <b>Life</b><span>± buttons, or click the number for the slider (applies when you click away).</span>
+        <b>Editing cards</b><span>Right-click → Edit card info… for new base P/T, types or text. Commanders also have Edit commander tax….</span>
+        <b>Losing</b><span>"I'm out" under your life. You can still chat and play with your own cards; none of it is logged. The last player standing wins.</span>
         <b>Opponents' stuff</b><span>Changing anything on another player's battlefield, hand, library or life asks them first.</span>
         <b>Battlefields</b><span>Wheel zooms, drag an empty spot to scroll. "All battlefields" shows everyone in turn order.</span>
         <b>d20</b><span>Click d20 to drop a die on your battlefield, then flick it (quick drag &amp; release). Click a rolled die to remove it.</span>
@@ -3008,10 +3465,14 @@
       case 'life':
         act({ type: 'life', playerId: pid, delta: Number(t.dataset.d) * (e.shiftKey ? 5 : 1) });
         break;
-      case 'setlife': {
-        const p = playerById(pid);
-        const n = await askNumber(`Set ${p.name}'s life`, p.life);
-        if (n !== null) act({ type: 'setLife', playerId: pid, value: n });
+      case 'setlife':
+        lifeDialog(pid);
+        break;
+      case 'out': {
+        const m = me();
+        if (!m) break;
+        if (m.out) act({ type: 'setOut', value: false });
+        else if (await confirmBox("You're out?", 'You stay at the table and can still chat and play around with your own cards (none of it goes in the log).', "I'm out", true)) act({ type: 'setOut', value: true });
         break;
       }
       case 'pc':
@@ -3191,7 +3652,7 @@
     dieEl, animateDie, trackFlick, randomFlick, D20_SVG,
     leaveGame, copyInvite, startGameClick, playFromHand, resolveStack, isLandCard, handIndexAt, isEquipLike,
     paneLayout, fitTray, fitView, viewCenter, cardsBox, openCounterPanel, closeCounterPanel, libraryClick, revealDialog,
-    ICONS,
+    ICONS, combatCardW, stackDrop, stackInfo, makeWiggle, isStackable, lifeDialog, turnLabel, turnElapsed, dieColor, editCardDialog, taxDialog, winBanner,
     combatInfo, combatColumnHTML, combatTargetsHTML, combatBarHTML, combatDrop, combatDefenders, cardHTML, DEFAULT_Z, combatClick, setCombatDef, currentCombatDef, switchCombatDef,
   };
   window.MTGUI = U;

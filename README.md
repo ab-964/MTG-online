@@ -13,6 +13,9 @@ A free, browser-based tabletop for playing **Magic: The Gathering** with up to 4
 - **A big free battlefield**: put cards anywhere; new cards land in the middle of your screen; **Fit** shows everything.
 - **Reveal until…**, a tidy library menu (click for the menu, double-click to draw), and a little shuffle animation.
 - **Emoji reactions** on chat and log lines: 😠 😂 🖕 😭 😨 💀 👍 😈 🫰
+- **Land & artifact stacks** (drop one on another, wiggle to break off), **edit card info** (new base P/T, types, text), editable **commander tax**.
+- **Turns counted by round** (1.1, 1.2, 2.1…) with a turn timer and how long each turn took in the log.
+- **Players can be out**: "I'm out" turns their panel dark red, they can keep messing with their own cards (not logged), and the last player standing gets a win banner with confetti made of the losers' torn-up cards.
 - **Rules aren't enforced.** Like a real table, you're in charge. Every card links to its Scryfall page for rulings.
 
 👉 **New here? Follow [docs/SETUP.md](docs/SETUP.md)** to put it on GitHub Pages (one time) and see what to do each time you play.
@@ -31,6 +34,8 @@ A free, browser-based tabletop for playing **Magic: The Gathering** with up to 4
 | See everyone | **All battlefields**: a grid in turn order (you bottom-left) |
 | Undo | **↶ Undo** or <kbd>Ctrl</kbd>+<kbd>Z</kbd> |
 | d20 | **d20** drops a die on your battlefield; flick it to roll, click it to remove |
+| Life | ± buttons, or click the number for the damage/gain slider |
+| Stack lands / artifacts | Drop one onto another (bottom half = front, top half = back). Drag the front card to move the stack; wiggle a card to break it off |
 
 ## Quick tour (phone)
 

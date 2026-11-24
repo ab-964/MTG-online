@@ -454,7 +454,7 @@ test('helper reads colour anthems', () => {
   assert.equal(r.unhandled, false);
 });
 
-test('first player draws on turn 1 in 3+ player games, but not in 2-player games', () => {
+test('first player always draws on turn 1', () => {
   for (const n of [2, 3]) {
     const g = E.createGame({ name: 'T' });
     const ps = ['A', 'B', 'C'].slice(0, n).map((x) => E.joinGame(g, x).player);
@@ -463,7 +463,9 @@ test('first player draws on turn 1 in 3+ player games, but not in 2-player games
     for (const p of ps) E.applyAction(g, p, { type: 'keep' });
     for (let i = 0; i < 30 && g.setup.stage === 'roll'; i++) for (const p of ps) if (g.setup.eligible.includes(p.id)) E.applyAction(g, p, { type: 'rollInitiative', vx: 500, vy: 500 });
     const first = ps.find((p) => p.id === g.turn.active);
-    assert.equal(first.zones.hand.length, n === 2 ? 7 : 8);
+    assert.equal(first.zones.hand.length, 8);
+    assert.equal(g.turn.round, 1);
+    assert.equal(g.turn.seat, 1);
   }
 });
 
@@ -477,4 +479,128 @@ test('reactions on log lines toggle per player', () => {
   E.applyAction(g, a, { type: 'react', logId: id, emoji: '💀' });
   assert.deepEqual(g.log.find((e) => e.id === id).reactions['💀'], [b.id]);
   assert.throws(() => E.applyAction(g, a, { type: 'react', logId: id, emoji: '🍕' }), E.GameError);
+});
+
+function started(n = 2, cards = [{ name: 'Forest', qty: 30, typeLine: 'Basic Land — Forest' }]) {
+  const g = E.createGame({ name: 'T' });
+  const ps = ['A', 'B', 'C'].slice(0, n).map((x) => E.joinGame(g, x).player);
+  for (const p of ps) E.applyAction(g, p, { type: 'loadDeck', deck: { name: 'D', cards } });
+  E.applyAction(g, ps[0], { type: 'startGame' });
+  for (const p of ps) E.applyAction(g, p, { type: 'keep' });
+  for (let i = 0; i < 30 && g.setup.stage === 'roll'; i++) for (const p of ps) if (g.setup.eligible.includes(p.id)) E.applyAction(g, p, { type: 'rollInitiative', vx: 500, vy: 500 });
+  return { g, ps };
+}
+
+test('start game waits for everyone to have a deck', () => {
+  const g = E.createGame({ name: 'T' });
+  const a = E.joinGame(g, 'A').player;
+  E.joinGame(g, 'B');
+  E.applyAction(g, a, { type: 'loadDeck', deck: { name: 'D', cards: [{ name: 'Forest', qty: 10, typeLine: 'Basic Land' }] } });
+  assert.throws(() => E.applyAction(g, a, { type: 'startGame' }), /Waiting for B/);
+});
+
+test('turns are numbered by round and seat, with time taken logged', () => {
+  const { g } = started(3);
+  const act = () => g.players.find((p) => p.id === g.turn.active);
+  E.applyAction(g, act(), { type: 'passTurn' });
+  assert.deepEqual([g.turn.round, g.turn.seat], [1, 2]);
+  E.applyAction(g, act(), { type: 'passTurn' });
+  E.applyAction(g, act(), { type: 'passTurn' });
+  assert.deepEqual([g.turn.round, g.turn.seat], [2, 1]);
+  assert.ok(g.log.some((e) => /turn took/.test(e.text)));
+  assert.ok(g.log.some((e) => e.head && /Turn 2\.1/.test(e.text)));
+});
+
+test('players who are out are skipped, not logged, and the last one wins', () => {
+  const { g, ps } = started(3);
+  const [a, b, c] = ps;
+  E.applyAction(g, b, { type: 'setOut' });
+  const n = g.log.length;
+  const card = g.cards[b.zones.hand[0]];
+  E.applyAction(g, b, { type: 'move', cardId: card.id, to: 'battlefield' });
+  assert.equal(g.log.length, n);
+  assert.equal(card.zone, 'battlefield');
+  for (let i = 0; i < 4; i++) {
+    E.applyAction(g, g.players.find((p) => p.id === g.turn.active), { type: 'passTurn' });
+    assert.notEqual(g.turn.active, b.id);
+  }
+  E.applyAction(g, c, { type: 'setOut' });
+  assert.equal(g.winner.id, a.id);
+});
+
+test('resolving someone else\'s spell puts it on its owner\'s battlefield', () => {
+  const { g, ps } = started(2, [{ name: 'Bear', qty: 30, typeLine: 'Creature — Bear', pt: '2/2' }]);
+  const [a, b] = ps;
+  const c = g.cards[a.zones.hand[0]];
+  E.applyAction(g, a, { type: 'move', cardId: c.id, to: 'stack' });
+  E.applyAction(g, b, { type: 'move', cardId: c.id, to: 'battlefield' });
+  assert.equal(c.zp, a.id);
+});
+
+test('land stacks: insert, reorder, move together, break apart', () => {
+  const { g, ps } = started(2);
+  const a = ps[0];
+  const ids = a.zones.hand.slice(0, 4);
+  ids.forEach((id, i) => E.applyAction(g, a, { type: 'move', cardId: id, to: 'battlefield', x: 1000 + i * 200, y: 1000 }));
+  const [w, x, y, z] = ids.map((id) => g.cards[id]);
+  E.applyAction(g, a, { type: 'stackInsert', cardId: x.id, targetId: w.id, index: 1 });
+  E.applyAction(g, a, { type: 'stackInsert', cardId: y.id, targetId: w.id, index: 2 });
+  E.applyAction(g, a, { type: 'stackInsert', cardId: z.id, targetId: w.id, index: 0 });
+  assert.deepEqual(Object.values(a.stacks)[0], [z.id, w.id, x.id, y.id]);
+  assert.equal(z.x, 1000);
+  assert.equal(y.y, 1000 - 3 * E.STACK_STEP);
+  E.applyAction(g, a, { type: 'position', cardId: z.id, x: 2000, y: 2000 });
+  assert.equal(y.x, 2000);
+  E.applyAction(g, a, { type: 'stackBreak', cardId: w.id, x: 3000, y: 3000 });
+  assert.deepEqual(Object.values(a.stacks), [[x.id, y.id]]); // z is alone, x+y stay stacked
+  // x,y would be one stack of two
+  E.applyAction(g, a, { type: 'stackInsert', cardId: w.id, targetId: x.id, index: 0 });
+  assert.ok(Object.values(a.stacks).some((s) => s.includes(w.id) && s.includes(x.id)));
+  E.applyAction(g, a, { type: 'move', cardId: x.id, to: 'graveyard' });
+  assert.ok(Object.values(a.stacks).every((s) => !s.includes(x.id)));
+});
+
+test('Coat of Arms and Master Biomancer style effects', () => {
+  const g = E.createGame({ name: 'T' });
+  const a = E.joinGame(g, 'A').player;
+  E.applyAction(g, a, { type: 'loadDeck', deck: { name: 'D', cards: [
+    { name: 'Elf One', qty: 1, typeLine: 'Creature — Elf Warrior', pt: '1/1' },
+    { name: 'Elf Two', qty: 1, typeLine: 'Creature — Elf Druid', pt: '1/1' },
+    { name: 'Goblin', qty: 1, typeLine: 'Creature — Goblin', pt: '1/1' },
+    { name: 'Coat', qty: 1, typeLine: 'Artifact', effects: [{ kind: 'forEach', who: 'all', p: 1, t: 1, count: 'creature', where: 'all', other: true, shares: true }] },
+    { name: 'Biomancer', qty: 1, typeLine: 'Creature — Elf Wizard', pt: '2/4', effects: [{ kind: 'etb', who: 'yoursOther', nFrom: 'power', counter: '+1/+1', typeAdd: 'Mutant' }] },
+    { name: 'Bear', qty: 1, typeLine: 'Creature — Bear', pt: '2/2' },
+  ] } });
+  const byName = (n) => Object.values(g.cards).find((c) => c.name === n);
+  for (const n of ['Elf One', 'Elf Two', 'Goblin', 'Coat']) E.applyAction(g, a, { type: 'move', cardId: byName(n).id, to: 'battlefield' });
+  let st = E.computeStats(g);
+  assert.equal(st[byName('Elf One').id].total, '2/2');
+  assert.equal(st[byName('Goblin').id].total, '1/1');
+  E.applyAction(g, a, { type: 'move', cardId: byName('Biomancer').id, to: 'battlefield' });
+  E.applyAction(g, a, { type: 'move', cardId: byName('Bear').id, to: 'battlefield' });
+  const bear = byName('Bear');
+  // Biomancer is 2/4 + 2 elves = 4/6, so the bear enters with 4 counters and becomes a Mutant
+  assert.equal(bear.counters['+1/+1'], 4);
+  assert.ok(bear.extraTypes.includes('Mutant'));
+  // keyword / power filters on who gets it
+  const eff = E.cleanEffects([{ kind: 'pt', who: 'all', p: 1, t: 0, pOp: '<=', pN: 1 }])[0];
+  assert.equal(eff.pOp, '<=');
+  assert.match(E.describeEffect(eff), /power 1 or less/);
+});
+
+test('edit card info, commander tax, proliferate N, token copies, reveal excluding lands', () => {
+  const { g, ps } = started(2, [{ name: 'Bear', qty: 20, typeLine: 'Creature — Bear', pt: '2/2', cmc: 2 }, { name: 'Forest', qty: 20, typeLine: 'Basic Land', cmc: 0 }]);
+  const a = ps[0];
+  const c = g.cards[a.zones.hand[0]];
+  E.applyAction(g, a, { type: 'move', cardId: c.id, to: 'battlefield' });
+  E.applyAction(g, a, { type: 'editCard', cardId: c.id, pt: '5/5', typeLine: 'Creature — Bear Dragon' });
+  assert.equal(E.computeStats(g)[c.id].total, '5/5');
+  E.applyAction(g, a, { type: 'cardCounter', cardId: c.id, name: 'charge', delta: 1 });
+  E.applyAction(g, a, { type: 'proliferate', cardIds: [c.id], n: 3 });
+  assert.equal(c.counters.charge, 4);
+  const before = Object.keys(g.cards).length;
+  E.applyAction(g, a, { type: 'clone', cardId: c.id, count: 3 });
+  assert.equal(Object.keys(g.cards).length, before + 3);
+  E.applyAction(g, a, { type: 'revealUntil', nonland: true, mvOp: '<', mv: 3 });
+  assert.ok(!/Land/.test(g.cards[g.reveal.found].typeLine));
 });

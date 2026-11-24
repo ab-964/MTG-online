@@ -682,7 +682,7 @@ body.phone-mode .drag-ghost { opacity: .75; }
 .pwatch.mine { grid-template-columns: 0 minmax(0, 1fr); position: relative; }
 .phone.log-on .pwatch { grid-template-columns: 170px minmax(0, 1fr) 76px; }
 .phone.log-on .pwatch.mine { grid-template-columns: 170px minmax(0, 1fr); }
-.phone:not(.log-on) .pwatch .plog { display: none; }
+.phone:not(.log-on) .pwatch .plogcol { display: none; }
 /* library + graveyard peeking from the right edge */
 .ppiles { position: absolute; right: 0; top: 50%; transform: translateY(-50%); z-index: 22; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
 .ppile { pointer-events: auto; position: relative; width: 74px; height: 104px; margin-right: -37px; border-radius: 8px; border: 2px solid #1b1410; background: #222; padding: 0; overflow: hidden; box-shadow: -3px 3px 10px rgba(0,0,0,.5); }
@@ -734,7 +734,7 @@ body.phone-mode.portrait .pzone { flex-basis: 40%; }
 body.phone-mode.portrait .pgrid { grid-template-columns: 1fr; grid-auto-rows: 1fr; }
 body.phone-mode.portrait .pgrid .pcell { grid-area: auto !important; }
 /* keep columns fixed when the log column is hidden */
-.pwatch > .plog { grid-column: 1; grid-row: 1; }
+.pwatch > .plog, .pwatch > .plogcol { grid-column: 1; grid-row: 1; }
 .pwatch > .pslot { grid-column: 2; grid-row: 1; }
 .pwatch > .pside { grid-column: 3; grid-row: 1; }
 /* phone combat: boxes grow with their columns; the area scrolls instead of overflowing */
@@ -743,3 +743,55 @@ body.phone-mode.portrait .pgrid .pcell { grid-area: auto !important; }
 .pcb-main .cb-cols { flex: none; overflow: visible; }
 body.phone-mode:not(.portrait) .pcb-head { padding-top: 8px; padding-right: 50%; }
 .phone:not(.no-piles) .plife { right: 96px; }
+
+/* ============================================================ v5 */
+.plogcol { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--panel); border-right: 1px solid var(--line); }
+.plogcol .plog { flex: 1; border-right: 0; }
+.pchat { padding: 4px; border-top: 1px solid var(--line); }
+.pchat input { width: 100%; font-size: 16px; padding: 5px 8px; }
+.ptimer { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; padding: 0 6px; white-space: nowrap; }
+.ptimer:empty { display: none; }
+/* log: react button on the left, blue turn headers, turn times */
+.log .e .rx-add { position: static; opacity: 0; margin: 0 4px 0 0; padding: 0 4px; line-height: 16px; font-size: 11px; vertical-align: 1px; }
+.log .e:hover .rx-add { opacity: 1; }
+.log .e .rx:not(:has(.rx-chip)) { display: none; }
+body.phone-mode .log .e .rx-add { opacity: .55; }
+.log .e.k-head { color: #7fb2ff; font-weight: 700; border-top: 1px solid rgba(127,178,255,.25); padding-top: 4px; margin-top: 2px; }
+.log .e.k-time { color: var(--muted); font-size: 10px; font-style: italic; }
+.turn-timer { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; min-width: 38px; text-align: right; }
+.pass-row { align-items: center; justify-content: flex-end; }
+#btn-start:disabled { opacity: .45; cursor: not-allowed; }
+/* players who are out */
+.player-area.is-out .ppanel, .pinfo.out, .plife.out { background: #290505 !important; }
+.out-tag { color: #d9a0a0; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.out-btn { color: #d9a0a0; }
+/* win banner + confetti */
+.win { position: fixed; inset: 0; z-index: 3000; pointer-events: none; overflow: hidden; }
+.win-card { pointer-events: auto; position: absolute; left: 50%; top: 32%; transform: translate(-50%, -50%); background: rgba(16,20,27,.94); border: 1px solid #5b6b85; border-radius: 16px; padding: 22px 34px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+.win-title { font-size: 34px; font-weight: 800; margin-bottom: 14px; color: #fff; }
+.shred { position: absolute; top: 0; background-repeat: no-repeat; box-shadow: 0 2px 4px rgba(0,0,0,.4); }
+/* dice match the battlefield */
+.die .d-out { fill: color-mix(in srgb, var(--dc) 62%, #fff 38%); stroke: #0a0a0a; }
+.die .d-in { fill: color-mix(in srgb, var(--dc) 45%, #fff 55%); }
+.die .dn { color: #0d0d0d; }
+.prolif-n { display: inline-flex; align-items: center; gap: 6px; }
+.life-modal .lf-range { width: 100%; }
+/* combat: centred, zoomable */
+.cbo-main { display: flex; overflow: auto; }
+.cbo-inner { margin: auto; display: flex; gap: 12px; align-items: flex-start; min-width: min(100%, 760px); padding: 6px; }
+.cbo-inner > .cb-target.player { flex-grow: 1; }
+.cb-zoom { display: inline-flex; gap: 2px; }
+.cbo-bar .btn.on { background: #3a4558; border-color: #8fb3e0; }
+.combat.combat-ov.split { top: auto; height: auto; background: none; backdrop-filter: none; pointer-events: none; }
+.combat.combat-ov.split .cbo-bar { pointer-events: auto; }
+.cb-cell { position: absolute; inset: 0; z-index: 60; background: rgba(8,10,14,.82); display: flex; flex-direction: column; gap: 6px; padding: 8px; overflow: auto; cursor: default; }
+.cb-cell .cbo-main { flex: 1; min-height: 0; }
+.cb-cell .cbo-inner { min-width: 0; }
+.cbc-head { display: flex; align-items: center; gap: 8px; color: #d7dbe3; font-weight: 600; }
+.cbc-avail { justify-content: center; border-top: 1px solid rgba(255,255,255,.08); padding-top: 6px; }
+.pcb-main .cbo-inner { min-width: 100%; }
+/* land / artifact stacks */
+.drag-ghost.stack-ghost { background: none; box-shadow: none; border: 0; overflow: visible; }
+.drag-ghost.stack-ghost .sg-card { position: absolute; left: 0; width: 100%; border-radius: 6px; overflow: hidden; box-shadow: 0 -2px 6px rgba(0,0,0,.45); }
+.drag-ghost.stack-ghost .sg-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cb-target .cb-cols { justify-content: center; }
