@@ -301,8 +301,16 @@
     U.status = { level, text };
   }
 
+  /** Uploaded token pictures and chat GIFs, sent by the host once each. */
+  const imgStore = {};
+  function resolveImages(view) {
+    for (const c of Object.values((view && view.cards) || {}))
+      for (const k of ['img', 'backImg']) if (typeof c[k] === 'string' && c[k].startsWith('upl:')) c[k] = imgStore[c[k]] || null;
+  }
+
   function onState(view) {
     if (view && view.now) clockOffset = view.now - Date.now();
+    resolveImages(view);
     S = view;
     render();
     firstState = false;
@@ -312,6 +320,7 @@
     if (msg.type === 'notify') toast(msg.text, 'error');
     if (msg.type === 'private' && msg.private) openViewerPrivate(msg.private);
     if (msg.type === 'effects') updateSavedDeckEffects(msg.name, msg.effects);
+    if (msg.type === 'images') Object.assign(imgStore, msg.images || {});
   }
 
   const HINTED = new Set(['move', 'createToken', 'placeDie', 'clone', 'resolveReveal', 'unattach']);
@@ -698,6 +707,116 @@
   }
   const rxAddHTML = (e) => (e.kind === 'time' ? '' : `<button class="rx-add" data-rxpick="${e.id}" title="React">☺︎</button>`);
 
+  function gifHTML(ref) {
+    const src = ref.startsWith('gif:') ? imgStore[ref] : ref;
+    return src ? `<img class="chat-gif" src="${esc(src)}" alt="GIF" loading="lazy">` : '<span class="muted small">(a GIF from an earlier session)</span>';
+  }
+
+  /* --------------------------------------------- pictures and GIFs */
+
+  const readAsDataURL = (file) =>
+    new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error('Could not read that file.'));
+      r.readAsDataURL(file);
+    });
+
+  /** Shrink a picture to card size (cropped to fit) so it's quick to send. */
+  async function fileToCardImage(file) {
+    if (!file || !/^image\//.test(file.type)) throw new Error('Pick a picture file.');
+    const url = URL.createObjectURL(file);
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = () => reject(new Error("Couldn't open that picture."));
+        i.src = url;
+      });
+      const W = 250;
+      const H = 350;
+      const cv = document.createElement('canvas');
+      cv.width = W;
+      cv.height = H;
+      const ctx = cv.getContext('2d');
+      const sc = Math.max(W / img.width, H / img.height);
+      const w = img.width * sc;
+      const h = img.height * sc;
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, W, H);
+      ctx.drawImage(img, (W - w) / 2, (H - h) / 2, w, h);
+      return cv.toDataURL('image/jpeg', 0.82);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  function pickFile(accept = 'image/*') {
+    return new Promise((resolve) => {
+      const inp = document.createElement('input');
+      inp.type = 'file';
+      inp.accept = accept;
+      inp.onchange = () => resolve(inp.files && inp.files[0]);
+      inp.click();
+    });
+  }
+
+  async function uploadTokenPicture(c) {
+    const file = await pickFile();
+    if (!file) return;
+    try {
+      const data = await fileToCardImage(file);
+      act({ type: 'setTokenImage', cardId: c.id, upload: data });
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  }
+
+  const GIF_SITES = /^https:\/\/(media\d*\.giphy\.com|i\.giphy\.com|media\.tenor\.com|c\.tenor\.com|i\.imgur\.com)\//i;
+  /** Send a GIF (file, or a link dragged from Giphy / Tenor / Imgur) to the chat. */
+  async function sendGif({ file, url }) {
+    if (file) {
+      if (!/^image\//.test(file.type)) return toast('Only pictures and GIFs can go in the chat.', 'error');
+      if (file.size > 2 * 1024 * 1024) return toast('That GIF is over 2 MB. Try a smaller one.', 'error');
+      const data = await readAsDataURL(file);
+      return act({ type: 'chat', text: '', gifData: data });
+    }
+    if (url && GIF_SITES.test(url)) return act({ type: 'chat', text: '', gif: url });
+    if (url) toast('GIFs dragged from websites need to come from Giphy, Tenor or Imgur. Or save the GIF and drag the file in.', 'error');
+  }
+  function gifFromDataTransfer(dt) {
+    const file = [...(dt.files || [])].find((f) => /^image\//.test(f.type));
+    if (file) return { file };
+    const html = dt.getData('text/html') || '';
+    const m = /<img[^>]+src=["']([^"']+)["']/i.exec(html);
+    const url = (m && m[1]) || (dt.getData('text/uri-list') || '').split('\n').find((l) => l && !l.startsWith('#')) || dt.getData('text/plain');
+    return url ? { url: url.trim() } : null;
+  }
+  /** Drag a GIF onto the log / chat, or paste one into the chat box. */
+  function enableGifDrop(el) {
+    if (!el || el.dataset.gifdrop) return;
+    el.dataset.gifdrop = '1';
+    el.addEventListener('dragover', (e) => {
+      if (![...e.dataTransfer.types].some((t) => t === 'Files' || t === 'text/uri-list' || t === 'text/html')) return;
+      e.preventDefault();
+      el.classList.add('gif-over');
+    });
+    el.addEventListener('dragleave', () => el.classList.remove('gif-over'));
+    el.addEventListener('drop', (e) => {
+      el.classList.remove('gif-over');
+      const g = gifFromDataTransfer(e.dataTransfer);
+      if (!g) return;
+      e.preventDefault();
+      sendGif(g);
+    });
+    el.addEventListener('paste', (e) => {
+      const file = [...((e.clipboardData && e.clipboardData.files) || [])].find((f) => /^image\//.test(f.type));
+      if (!file) return;
+      e.preventDefault();
+      sendGif({ file });
+    });
+  }
+
   function renderLog(log) {
     if (!log) return;
     const entries = S.log || [];
@@ -727,7 +846,7 @@
       d.innerHTML =
         rxAddHTML(e) +
         (e.kind === 'chat'
-          ? `<span class="t">${time}</span><b style="color:${esc(e.color)}">${esc(e.who)}:</b> ${esc(e.text)}`
+          ? `<span class="t">${time}</span><b style="color:${esc(e.color)}">${esc(e.who)}:</b> ${esc(e.text)}${e.gif ? gifHTML(e.gif) : ''}`
           : `<span class="t">${time}</span>${esc(e.text)}`) + `<div class="rx">${reactionsHTML(e)}</div>`;
       log.appendChild(d);
       last = e.id;
@@ -1406,6 +1525,7 @@
     lastCombatKey = key;
     let back = $('#combat-back');
     if (!cb || U.phone) {
+      renderCombatCells(false); // also clear the per-player layers
       box.hidden = true;
       box.innerHTML = '';
       if (back) back.hidden = true;
@@ -2357,6 +2477,10 @@
     }
     if (!c.hidden && c.zone !== 'library') items.push({ label: 'Effects…', fn: () => effectsDialog(c) });
     if (!c.hidden && c.zone !== 'library') items.push({ label: 'Edit card info…', fn: () => editCardDialog(c) });
+    if (c.isToken && !c.hidden) {
+      items.push({ label: 'Upload a picture…', fn: () => uploadTokenPicture(c) });
+      if (c.img && c.img.startsWith('data:')) items.push({ label: 'Remove uploaded picture', fn: () => act({ type: 'setTokenImage', cardId: c.id, upload: null }) });
+    }
     if (c.isCommander && !c.hidden) items.push({ label: `Edit commander tax ({${(c.castCount || 0) * 2}})…`, fn: () => taxDialog(c) });
     if (c.tokens && c.tokens.length) {
       items.push({ sep: true });
@@ -2430,6 +2554,7 @@
       { row: [{ label: 'Draw', fn: () => act({ type: 'draw', n: 1 }) }, { label: 'Draw X…', cls: 'x', fn: ask('Draw how many?', 2, (n) => act({ type: 'draw', n })) }] },
       { row: [{ label: 'Mill', fn: () => act({ type: 'mill', n: 1 }) }, { label: 'Mill X…', cls: 'x', fn: ask('Mill how many?', 2, (n) => act({ type: 'mill', n })) }] },
       { row: [{ label: 'Peek', fn: () => openViewer(S.you, 'library', 1) }, { label: 'Peek X…', cls: 'x', fn: ask('Look at how many cards from the top?', 3, (n) => openViewer(S.you, 'library', n)) }] },
+      { row: [{ label: 'Reveal', fn: () => act({ type: 'revealX', n: 1 }) }, { label: 'Reveal X…', cls: 'x', fn: ask('Reveal how many cards from the top?', 3, (n) => act({ type: 'revealX', n })) }] },
       { label: 'Reveal until…', fn: revealDialog },
       { label: 'Search…', fn: () => openViewer(S.you, 'library') },
       { label: 'Shuffle', fn: () => act({ type: 'shuffle' }) },
@@ -2516,13 +2641,14 @@
     const key = `${rv.ids.join()}|${mine}`;
     if (box.dataset.key === key) return;
     box.dataset.key = key;
-    box.innerHTML = `<div class="rv-head"><b>${esc(who ? (mine ? 'You' : who.name) : '?')} revealed until ${esc(rv.crit)}</b>
-        <span class="muted">${rv.found ? 'Found one!' : 'Nothing matched.'}</span></div>
+    const isX = rv.kind === 'x';
+    box.innerHTML = `<div class="rv-head"><b>${esc(who ? (mine ? 'You' : who.name) : '?')} ${isX ? `revealed the top ${rv.ids.length} card${rv.ids.length === 1 ? '' : 's'}` : `revealed until ${esc(rv.crit)}`}</b>
+        <span class="muted">${isX ? '' : rv.found ? 'Found one!' : 'Nothing matched.'}</span></div>
       <div class="rv-cards">${rv.ids.map((id) => `<div class="rv-card ${id === rv.found ? 'found' : ''}">${cardHTML(S.cards[id], 'reveal')}</div>`).join('')}</div>
       ${
         mine
           ? `<div class="rv-choose">${rv.found ? '<div class="grp" data-grp="found"><span>Found card →</span><button class="btn small on" data-rv="hand">Hand</button><button class="btn small" data-rv="battlefield">Battlefield</button><button class="btn small" data-rv="top">Top of library</button></div>' : ''}
-            <div class="grp" data-grp="rest"><span>The rest →</span><button class="btn small on" data-rv="bottom">Bottom (random order)</button><button class="btn small" data-rv="graveyard">Graveyard</button><button class="btn small" data-rv="exile">Exile</button></div>
+            <div class="grp" data-grp="rest"><span>${isX ? 'They go →' : 'The rest →'}</span>${isX ? '<button class="btn small on" data-rv="top">Back on top</button><button class="btn small" data-rv="hand">Hand</button>' : ''}<button class="btn small ${isX ? '' : 'on'}" data-rv="bottom">Bottom (random order)</button><button class="btn small" data-rv="graveyard">Graveyard</button><button class="btn small" data-rv="exile">Exile</button></div>
             <button class="btn primary rv-go">Done</button></div>`
           : `<div class="muted small">Waiting for ${esc(who ? who.name : '?')} to decide where they go…</div>`
       }`;
@@ -2927,10 +3053,12 @@
           .join('')}</div>
         <div id="tk-res" class="token-results"></div>
         <div class="sect-title">…or make your own</div>
-        <div class="row gap"><input id="tk-name" placeholder="Name, e.g. Elemental" style="flex:1" data-noenter="1"><input id="tk-pt" placeholder="P/T e.g. 3/3" style="width:110px" data-noenter="1"><button class="btn" id="tk-custom">Create</button></div>`,
+        <div class="row gap"><input id="tk-name" placeholder="Name, e.g. Elemental" style="flex:1" data-noenter="1"><input id="tk-pt" placeholder="P/T e.g. 3/3" style="width:110px" data-noenter="1"><button class="btn" id="tk-custom">Create</button></div>
+        <div class="row gap tk-pic"><button class="btn small" id="tk-pic">Add a picture…</button><span class="muted small" id="tk-pic-name">optional, any image</span><img id="tk-pic-prev" alt="" hidden></div>`,
       buttons: [{ label: 'Close', value: null }],
       onMount(root, close) {
         let results = [];
+        let picture = null;
         const count = () => clamp(Number.parseInt(root.querySelector('#tk-n').value, 10) || 1, 1, 30);
         const search = async (q) => {
           const box = root.querySelector('#tk-res');
@@ -2953,6 +3081,21 @@
         root.addEventListener('click', (e) => {
           const b = e.target.closest('button');
           if (!b) return;
+          if (b.id === 'tk-pic') {
+            pickFile().then(async (file) => {
+              if (!file) return;
+              try {
+                picture = await fileToCardImage(file);
+                root.querySelector('#tk-pic-name').textContent = file.name;
+                const prev = root.querySelector('#tk-pic-prev');
+                prev.src = picture;
+                prev.hidden = false;
+              } catch (err) {
+                toast(err.message, 'error');
+              }
+            });
+            return;
+          }
           if (b.id === 'tk-go') search(root.querySelector('#tk-q').value);
           else if (b.dataset.q) {
             root.querySelector('#tk-q').value = b.dataset.q;
@@ -2966,7 +3109,7 @@
             const name = root.querySelector('#tk-name').value.trim();
             if (!name) return;
             const pt = root.querySelector('#tk-pt').value.trim();
-            act({ type: 'createToken', name, pt, typeLine: `Token${pt ? ' Creature' : ''}`, count: count(), playerId: pid });
+            act({ type: 'createToken', name, pt, typeLine: `Token${pt ? ' Creature' : ''}`, count: count(), playerId: pid, ...(picture ? { upload: picture } : {}) });
             close(null);
           }
         });
@@ -3279,10 +3422,12 @@
         <b>Stack</b><span>Double-click to resolve. Right-click for Resolves / Doesn't resolve.</span>
         <b>Equipment &amp; auras</b><span>Drag one onto a creature to attach it (or right-click → Attach to…).</span>
         <b>Effects</b><span>Right-click → Effects… to set up what a card does (anthems, "for each" bonuses, extra counters, keywords). Totals update automatically.</span>
-        <b>Library</b><span>Click for the menu (draw, mill, peek, reveal until…, search, shuffle). Double-click (or <kbd>D</kbd>) to draw.</span>
+        <b>Library</b><span>Click for the menu (draw, mill, peek, reveal X, reveal until…, search, shuffle). Double-click (or <kbd>D</kbd>) to draw.</span>
         <b>Counters</b><span>Right-click a permanent → Counters…: type numbers or use ± and press Save (✕ throws changes away). Permanents with counters show them when right-clicked.</span>
         <b>Combat</b><span>Click the Combat phase (or Combat). Drag creatures up from the bottom row onto the player or a planeswalker; defenders drag blockers onto a column. − / + zooms, <i>Modifiers</i> shows +X / ×N on every attacker, <i>View field</i> hides the screen for a moment. In All battlefields, <i>Per player</i> puts combat over each player's square. +X / ×N change a column's damage; everyone presses Done when ready.</span>
         <b>Reactions</b><span>Hover a chat or log line and click ☺︎ on the left.</span>
+        <b>GIFs</b><span>Drag a GIF file onto the log/chat (or paste one into the chat box). GIFs dragged straight from Giphy, Tenor or Imgur work too.</span>
+        <b>Token pictures</b><span>When making your own token, "Add a picture…". Any token: right-click → Upload a picture….</span>
         <b>Land stacks</b><span>Drop a land or artifact onto another: bottom half = in front, top half = at the back, or onto a name bar to slot it in. Drag the front card to move the whole stack, drag a back card to re-order it, and wiggle a card while dragging to break it off. Settings can stack same-name ones automatically.</span>
         <b>Life</b><span>± buttons, or click the number for the slider (applies when you click away).</span>
         <b>Editing cards</b><span>Right-click → Edit card info… for new base P/T, types or text. Commanders also have Edit commander tax….</span>
@@ -3586,6 +3731,7 @@
   $('#btn-d20').addEventListener('click', () => act({ type: 'placeDie' }));
   $('#btn-prolif').addEventListener('click', startProliferate);
   $('#btn-combat').addEventListener('click', () => act({ type: 'combatStart' }));
+  enableGifDrop($('#sidebar'));
   $('#chat-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const i = $('#chat-input');
@@ -3652,7 +3798,7 @@
     dieEl, animateDie, trackFlick, randomFlick, D20_SVG,
     leaveGame, copyInvite, startGameClick, playFromHand, resolveStack, isLandCard, handIndexAt, isEquipLike,
     paneLayout, fitTray, fitView, viewCenter, cardsBox, openCounterPanel, closeCounterPanel, libraryClick, revealDialog,
-    ICONS, combatCardW, stackDrop, stackInfo, makeWiggle, isStackable, lifeDialog, turnLabel, turnElapsed, dieColor, editCardDialog, taxDialog, winBanner,
+    ICONS, enableGifDrop, combatCardW, stackDrop, stackInfo, makeWiggle, isStackable, lifeDialog, turnLabel, turnElapsed, dieColor, editCardDialog, taxDialog, winBanner,
     combatInfo, combatColumnHTML, combatTargetsHTML, combatBarHTML, combatDrop, combatDefenders, cardHTML, DEFAULT_Z, combatClick, setCombatDef, currentCombatDef, switchCombatDef,
   };
   window.MTGUI = U;

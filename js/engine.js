@@ -36,7 +36,7 @@ const PLANE_V = 3;
 const CARD_W = 100;
 const CARD_H = 140;
 const LOG_LIMIT = 400;
-const REACTIONS = ['😠', '😂', '🖕', '😭', '😨', '💀', '👍', '😈', '🫰'];
+const REACTIONS = ['😠', '😂', '🖕', '😭', '😨', '💀', '👍', '😈', '🫰', '😛'];
 
 const rid = (bytes = 6) => randomHex(bytes);
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -84,7 +84,24 @@ const num = (v, min, max, dflt) => {
   return Math.max(min, Math.min(max, n));
 };
 const SCRYFALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const safeImg = (u) => (typeof u === 'string' && u.startsWith('https://cards.scryfall.io/') && u.length < 300 ? u : null);
+const UPLOAD_REF = /^upl:[0-9a-f]{6,16}$/; // a picture someone uploaded, kept in game.images
+const safeImg = (u) => (typeof u === 'string' && ((u.startsWith('https://cards.scryfall.io/') && u.length < 300) || UPLOAD_REF.test(u)) ? u : null);
+const IMAGE_DATA = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
+const MAX_IMAGE_CHARS = 200000;
+/** GIFs from these sites can be dragged into the chat as links. */
+const GIF_HOSTS = /^https:\/\/(media\d*\.giphy\.com|i\.giphy\.com|media\.tenor\.com|c\.tenor\.com|i\.imgur\.com)\/[^\s"'<>]+$/i;
+/** Store an uploaded picture; returns its "upl:…" reference. */
+function storeImage(game, data) {
+  if (typeof data !== 'string' || data.length > MAX_IMAGE_CHARS || !IMAGE_DATA.test(data)) fail('That picture is too big or not an image.');
+  game.images = game.images || {};
+  const used = new Set();
+  for (const c of Object.values(game.cards)) for (const k of ['img', 'backImg']) if (UPLOAD_REF.test(c[k] || '')) used.add(c[k].slice(4));
+  for (const id of Object.keys(game.images)) if (!used.has(id)) delete game.images[id]; // tidy up pictures nobody uses
+  if (Object.keys(game.images).length >= 60) fail('Too many uploaded pictures in this game.');
+  const id = rid(5);
+  game.images[id] = data;
+  return `upl:${id}`;
+}
 const safeScryfallUrl = (u) => (typeof u === 'string' && u.startsWith('https://scryfall.com/') && u.length < 400 ? u : null);
 
 /** Build a Scryfall image URL straight from a card's Scryfall id. */
@@ -1131,7 +1148,7 @@ function endCombat(game, actor) {
 
 /* ------------------------------------------------------------ permission */
 
-const UNDO_BARRIERS = new Set(['shuffle', 'mulligan', 'startGame', 'rollInitiative', 'rollDie', 'roll', 'coin', 'revealUntil', 'resolveReveal']);
+const UNDO_BARRIERS = new Set(['shuffle', 'mulligan', 'startGame', 'rollInitiative', 'rollDie', 'roll', 'coin', 'revealUntil', 'revealX', 'resolveReveal']);
 
 /** Returns the id of the player who must approve this action, or null. */
 function needsPermission(game, actor, a) {
@@ -1162,6 +1179,7 @@ function needsPermission(game, actor, a) {
     case 'unattach':
     case 'editCard':
     case 'setCastCount':
+    case 'setTokenImage':
     case 'stackInsert':
     case 'stackReorder':
     case 'stackBreak':
@@ -1618,13 +1636,16 @@ function applyActionInner(game, actor, a, opts = {}) {
         placeIn(game, c, zone, actor.id, { pos });
       };
       if (a.rest === 'bottom') shuffle(rest);
-      for (const id of rest) put(id, a.rest === 'graveyard' ? 'graveyard' : a.rest === 'exile' ? 'exile' : 'library', 'bottom');
+      if (a.rest === 'top') for (const id of rest.slice().reverse()) put(id, 'library', 'top');
+      else if (a.rest === 'hand') for (const id of rest) put(id, 'hand');
+      else for (const id of rest) put(id, a.rest === 'graveyard' ? 'graveyard' : a.rest === 'exile' ? 'exile' : 'library', 'bottom');
       if (rv.found) {
         const where = ['hand', 'battlefield', 'top'].includes(a.found) ? a.found : 'hand';
         put(rv.found, where === 'top' ? 'library' : where, where === 'top' ? 'top' : undefined);
       }
       const f = rv.found && game.cards[rv.found];
-      addLog(game, `${actor.name}: ${f ? `${f.name} went to ${a.found === 'top' ? 'the top of their library' : `their ${a.found || 'hand'}`}, ` : ''}${rest.length} other card${rest.length === 1 ? '' : 's'} went to ${a.rest === 'bottom' ? 'the bottom in a random order' : `their ${a.rest}`}.`);
+      const restWhere = a.rest === 'bottom' ? 'the bottom in a random order' : a.rest === 'top' ? 'back on top' : `their ${a.rest}`;
+      addLog(game, `${actor.name}: ${f ? `${f.name} went to ${a.found === 'top' ? 'the top of their library' : `their ${a.found || 'hand'}`}, ` : ''}${rest.length}${f ? ' other' : ''} card${rest.length === 1 ? '' : 's'} went to ${restWhere}.`);
       game.reveal = null;
       break;
     }
@@ -1864,7 +1885,7 @@ function applyActionInner(game, actor, a, opts = {}) {
       const tpl = cleanTemplate({
         name: a.name || 'Token',
         scryfallId,
-        img: a.img,
+        img: a.upload ? storeImage(game, a.upload) : a.img,
         backImg: a.backImg,
         backName: a.backName,
         typeLine: a.typeLine || 'Token',
@@ -1990,8 +2011,12 @@ function applyActionInner(game, actor, a, opts = {}) {
 
     case 'chat': {
       const text = str(String(a.text || '').trim(), 300);
-      if (!text) break;
-      addLog(game, text, { kind: 'chat', who: actor.name, color: actor.color });
+      // a GIF: either one the host stored for this session (gif:<id>) or a link from a GIF site
+      let gif = null;
+      if (typeof a.gif === 'string' && /^gif:[0-9a-f]{6,16}$/.test(a.gif)) gif = a.gif;
+      else if (typeof a.gif === 'string' && a.gif.length < 500 && GIF_HOSTS.test(a.gif)) gif = a.gif;
+      if (!text && !gif) break;
+      addLog(game, text, { kind: 'chat', who: actor.name, color: actor.color, ...(gif ? { gif } : {}) });
       break;
     }
 
@@ -2105,6 +2130,32 @@ function applyActionInner(game, actor, a, opts = {}) {
       bf.splice(bf.indexOf(c.id), 1);
       bf.push(c.id);
       return { quiet: true };
+    }
+
+    case 'setTokenImage': {
+      const c = needCard(game, a.cardId);
+      if (!c.isToken) fail('Only tokens can have an uploaded picture.');
+      const ref = a.upload ? storeImage(game, a.upload) : null;
+      if (c.flipped && c.backName) c.backImg = ref;
+      else c.img = ref;
+      addLog(game, `${actor.name} ${ref ? 'gave' : 'removed the picture from'} ${c.name}${ref ? ' a new picture' : ''}.`);
+      break;
+    }
+
+    case 'revealX': {
+      if (game.reveal) fail('Finish the current reveal first.');
+      const n = int(a.n, 1, 60, 1);
+      const ids = actor.zones.library.slice(0, n);
+      if (!ids.length) fail('Your library is empty.');
+      for (const id of ids) {
+        const c = game.cards[id];
+        detach(game, c);
+        c.zone = 'reveal';
+        c.zp = actor.id;
+      }
+      game.reveal = { pid: actor.id, ids, found: null, crit: '', kind: 'x' };
+      addLog(game, `${actor.name} revealed the top ${ids.length} of their library: ${ids.map((id) => game.cards[id].name).join(', ')}.`);
+      break;
     }
 
     case 'setCastCount': {
@@ -2359,6 +2410,7 @@ function upgradeGame(g) {
   if (g.combat === undefined) g.combat = null;
   if (g.reveal === undefined) g.reveal = null;
   if (g.winner === undefined) g.winner = null;
+  if (!g.images || typeof g.images !== 'object') g.images = {};
   if (!g.turn.round) {
     const order = (g.order || []).length ? g.order : (g.players || []).map((p) => p.id);
     const n = Math.max(1, order.length);
@@ -2427,6 +2479,7 @@ const api = {
   UNDO_BARRIERS,
   REACTIONS,
   STACK_STEP,
+  UPLOAD_REF,
   sharesCreatureType,
 };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;

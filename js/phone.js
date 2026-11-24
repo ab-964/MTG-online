@@ -111,6 +111,7 @@
       const ph = e.target.closest('[data-i]');
       if (ph) U.act({ type: 'setPhase', phase: Number(ph.dataset.i) });
     });
+    for (const el of $$('#phone .plogcol, #phone .plogview')) U.enableGifDrop(el);
     for (const f of $$('#phone .pchat'))
       f.addEventListener('submit', (e) => {
         e.preventDefault();

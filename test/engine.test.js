@@ -604,3 +604,34 @@ test('edit card info, commander tax, proliferate N, token copies, reveal excludi
   E.applyAction(g, a, { type: 'revealUntil', nonland: true, mvOp: '<', mv: 3 });
   assert.ok(!/Land/.test(g.cards[g.reveal.found].typeLine));
 });
+
+test('token pictures, reveal X, GIF chat lines', () => {
+  const { g, ps } = started(2, [{ name: 'Bear', qty: 30, typeLine: 'Creature — Bear', pt: '2/2' }]);
+  const a = ps[0];
+  const pic = 'data:image/jpeg;base64,' + 'A'.repeat(400);
+  E.applyAction(g, a, { type: 'createToken', name: 'Pet', pt: '1/1', typeLine: 'Token Creature', upload: pic });
+  const tok = Object.values(g.cards).find((c) => c.name === 'Pet');
+  assert.match(tok.img, E.UPLOAD_REF);
+  assert.equal(g.images[tok.img.slice(4)], pic);
+  assert.throws(() => E.applyAction(g, a, { type: 'setTokenImage', cardId: tok.id, upload: 'data:text/html;base64,AAAA' }), E.GameError);
+  E.applyAction(g, a, { type: 'clone', cardId: tok.id });
+  assert.equal(Object.values(g.cards).filter((c) => c.name === 'Pet' && c.img === tok.img).length, 2);
+  // reveal X then put them back on top in the same order
+  const top3 = a.zones.library.slice(0, 3);
+  E.applyAction(g, a, { type: 'revealX', n: 3 });
+  assert.deepEqual(g.reveal.ids, top3);
+  E.applyAction(g, a, { type: 'resolveReveal', rest: 'top' });
+  assert.deepEqual(a.zones.library.slice(0, 3), top3);
+  E.applyAction(g, a, { type: 'revealX', n: 2 });
+  E.applyAction(g, a, { type: 'resolveReveal', rest: 'hand' });
+  assert.ok(top3.slice(0, 2).every((id) => a.zones.hand.includes(id)));
+  // GIFs: a host-stored id or a link from a GIF site; other links are ignored
+  E.applyAction(g, a, { type: 'chat', gif: 'gif:abcdef1234' });
+  assert.equal(g.log[g.log.length - 1].gif, 'gif:abcdef1234');
+  E.applyAction(g, a, { type: 'chat', gif: 'https://media.tenor.com/x/y.gif' });
+  assert.equal(g.log[g.log.length - 1].gif, 'https://media.tenor.com/x/y.gif');
+  const n = g.log.length;
+  E.applyAction(g, a, { type: 'chat', gif: 'https://evil.example/x.gif' });
+  assert.equal(g.log.length, n);
+  assert.ok(E.REACTIONS.includes('😛'));
+});

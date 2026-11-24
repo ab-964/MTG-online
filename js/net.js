@@ -13,6 +13,7 @@
   const PEER_PREFIX = 'mtg-tabletop-v1-';
   const GAME_KEY = 'mtgtt.game.';
   const SEAT_KEY = 'mtgtt.seat.';
+  const MAX_GIF_CHARS = 2800000; // ~2 MB GIF
 
   /* ------------------------------------------------------------ storage */
 
@@ -99,6 +100,8 @@
   class HostSession {
     constructor(game, { onState, onStatus, onMessage }) {
       this.game = E.upgradeGame(game);
+      this.gifs = {}; // GIFs from the chat, this session only
+      this.selfImgs = new Set();
       this.onState = onState;
       this.onStatus = onStatus;
       this.onMessage = onMessage || (() => {});
@@ -210,6 +213,14 @@
 
     apply(player, action) {
       if (!action || typeof action !== 'object') return { error: 'Bad action.' };
+      if (action.type === 'chat' && action.gifData) {
+        // GIFs dropped into the chat live only for this session (too big to save with the game)
+        const data = String(action.gifData);
+        if (data.length > MAX_GIF_CHARS || !/^data:image\/(gif|webp|png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(data)) return { error: 'That GIF is too big (about 2 MB at most).' };
+        const id = E.rid(5);
+        this.gifs[id] = data;
+        action = { type: 'chat', text: action.text || '', gif: `gif:${id}` };
+      }
       if (action.type === 'removePlayer' && player.id !== this.game.hostPlayerId) return { error: 'Only the host can remove players.' };
       if (action.type === 'undo') return this.requestUndo(player);
       const snap = JSON.stringify(this.game);
@@ -304,12 +315,36 @@
       for (const c of this.conns) {
         if (!c.playerId || !c.open) continue;
         try {
-          c.send({ type: 'state', view: E.viewFor(this.game, c.playerId, ids) });
+          const view = E.viewFor(this.game, c.playerId, ids);
+          const imgs = this.newImages(view, (c.sentImgs = c.sentImgs || new Set()));
+          if (imgs) c.send({ type: 'images', images: imgs });
+          c.send({ type: 'state', view });
         } catch (e) {
           console.warn('send failed', e);
         }
       }
-      this.onState(E.viewFor(this.game, this.game.hostPlayerId, ids));
+      const mine = E.viewFor(this.game, this.game.hostPlayerId, ids);
+      const imgs = this.newImages(mine, this.selfImgs);
+      if (imgs) this.onMessage({ type: 'images', images: imgs });
+      this.onState(mine);
+    }
+
+    /** Uploaded pictures / GIFs a view refers to that this player hasn't been sent yet. */
+    newImages(view, sent) {
+      let out = null;
+      const want = (ref) => {
+        if (typeof ref !== 'string' || sent.has(ref)) return;
+        const data = ref.startsWith('upl:') ? (this.game.images || {})[ref.slice(4)] : ref.startsWith('gif:') ? this.gifs[ref.slice(4)] : null;
+        if (!data) return;
+        sent.add(ref);
+        (out = out || {})[ref] = data;
+      };
+      for (const c of Object.values(view.cards)) {
+        want(c.img);
+        want(c.backImg);
+      }
+      for (const e of view.log) if (e.gif) want(e.gif);
+      return out;
     }
 
     scheduleSave() {
@@ -453,6 +488,7 @@
         case 'private':
         case 'notify':
         case 'effects':
+        case 'images':
           this.onMessage(msg);
           break;
         case 'result': {
