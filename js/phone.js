@@ -792,7 +792,7 @@
         { sep: true },
         { label: 'Load deck…', icon: I.deck, fn: () => U.deckDialog() },
         { label: S.setup && S.setup.stage !== 'done' ? 'Restart game…' : 'Start game…', icon: I.play, fn: () => U.startGameClick() },
-        { label: 'Copy invite link', icon: I.link, fn: () => U.copyInvite() },
+        { label: navigator.share ? 'Share invite link' : 'Copy invite link', icon: I.link, fn: () => U.copyInvite() },
         { label: 'Settings', icon: I.gear, fn: () => U.settingsDialog() },
         { label: 'Help', icon: I.help, fn: () => U.helpDialog() },
         { label: 'Leave to lobby', icon: I.leave, fn: () => U.leaveGame() },

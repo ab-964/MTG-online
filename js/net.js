@@ -121,6 +121,25 @@
     start() {
       this.publish();
       this.openPeer();
+      // Phones pause hidden pages (locking the screen, switching apps to send the invite).
+      // When the page comes back, reconnect to the connection service straight away.
+      this.onVisible = () => {
+        if (document.hidden || this.destroyed) return;
+        this.keepAwake();
+        const p = this.peer;
+        if (!p || p.destroyed) this.openPeer();
+        else if (p.disconnected) {
+          try {
+            p.reconnect();
+          } catch {
+            this.openPeer();
+          }
+        }
+        this.publish();
+      };
+      document.addEventListener('visibilitychange', this.onVisible);
+      window.addEventListener('pageshow', this.onVisible);
+      this.keepAwake();
       // heartbeat so friends notice quickly if this page closes
       this.pingTimer = setInterval(() => {
         for (const c of this.conns) if (c.open) try { c.send({ type: 'ping' }); } catch { /* ignore */ }
@@ -155,6 +174,16 @@
           this.retryTimer = setTimeout(() => this.openPeer(), err.type === 'unavailable-id' ? 5000 : 3000);
         }
       });
+    }
+
+    /** Ask the phone not to dim / lock while this page hosts the game (where supported). */
+    async keepAwake() {
+      try {
+        if (!navigator.wakeLock || document.hidden || (this.wakeLock && !this.wakeLock.released)) return;
+        this.wakeLock = await navigator.wakeLock.request('screen');
+      } catch {
+        /* not supported or not allowed: fine */
+      }
     }
 
     status() {
@@ -359,6 +388,15 @@
 
     destroy() {
       this.destroyed = true;
+      if (this.onVisible) {
+        document.removeEventListener('visibilitychange', this.onVisible);
+        window.removeEventListener('pageshow', this.onVisible);
+      }
+      try {
+        if (this.wakeLock) this.wakeLock.release();
+      } catch {
+        /* ignore */
+      }
       this.saveNow();
       clearTimeout(this.retryTimer);
       clearInterval(this.pingTimer);
@@ -447,7 +485,30 @@
       }
       const conn = this.peer.connect(peerIdFor(this.code), { reliable: true });
       this.conn = conn;
+      clearTimeout(this.openTimer);
+      // The host's code can be registered while their device can't actually answer
+      // (a phone with the screen off, or a network that blocks direct links). Don't wait forever.
+      this.openTimer = setTimeout(() => {
+        if (this.conn !== conn || conn.open || this.destroyed) return;
+        this.attempts = (this.attempts || 0) + 1;
+        this.onStatus({
+          level: 'bad',
+          text:
+            this.attempts < 2
+              ? 'Still trying to reach the host…'
+              : "Can't reach the host's device. If they're on a phone, the game needs to stay open on their screen. Retrying…",
+        });
+        try {
+          conn.close();
+        } catch {
+          /* ignore */
+        }
+        // every few tries start completely fresh (new connection service session)
+        this.retry(1500, this.attempts % 3 === 0);
+      }, 12000);
       conn.on('open', () => {
+        clearTimeout(this.openTimer);
+        this.attempts = 0;
         this.lastSeen = Date.now();
         const seat = Store.getSeat(this.code, this.name) || {};
         conn.send({ type: 'hello', token: seat.token || null, name: this.name || seat.name || null });
@@ -534,6 +595,7 @@
     destroy() {
       this.destroyed = true;
       clearTimeout(this.retryTimer);
+      clearTimeout(this.openTimer);
       clearInterval(this.watchdog);
       if (this.peer) this.peer.destroy();
     }

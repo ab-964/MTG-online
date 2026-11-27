@@ -346,6 +346,16 @@
       return toast(`No saved game with code ${code} in this browser. To join a friend's game, use "Join a friend's game".`, 'error');
     }
     session = new HostSession(g, { onState, onStatus, onMessage });
+    if (wantPhone() && !Store.get('mtgtt.phoneHostTip'))
+      setTimeout(() => {
+        Store.set('mtgtt.phoneHostTip', true);
+        dialog({
+          title: 'Hosting from a phone',
+          body: `<p style="margin:0">Your phone <i>is</i> the game while you host, and phones pause pages that aren't on screen.</p>
+            <p>Keep this page open with the screen on. Use <b>Copy invite / Share</b> in the menu: the share sheet sends the link without leaving the page. If you do switch apps, friends reconnect when you come back.</p>`,
+          buttons: [{ label: 'Got it', value: null, primary: true }],
+        });
+      }, 800);
     U.session = session;
     showGame();
     session.start();
@@ -3686,6 +3696,15 @@
   async function copyInvite() {
     const code = S ? S.id : '';
     const link = location.protocol.startsWith('http') ? `${location.origin}${location.pathname}?join=${code}` : null;
+    // On phones, the share sheet sends the link without leaving this page (leaving pauses hosting)
+    if (U.phone && link && navigator.share) {
+      try {
+        await navigator.share({ title: 'Join my MTG game', text: `Join my MTG game (code ${code})`, url: link });
+        return;
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+      }
+    }
     try {
       await navigator.clipboard.writeText(link || code);
       toast(link ? 'Invite link copied. Send it to your friends!' : `Game code ${code} copied. Friends enter it under "Join a friend's game".`);
